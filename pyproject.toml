@@ -1,0 +1,39 @@
+[project]
+name = "voz-crawler"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "dagster",
+    "dagster-webserver",
+    "dagster-dbt",
+    "dlt[postgres]>=1.0",
+    "requests>=2.32",
+    "beautifulsoup4>=4.12",
+    "lxml",
+    "openai>=1.0",
+    "dagster-dlt>=0.28.19",
+    "dagster-postgres>=0.28.19",
+    "dagster-docker>=0.28.19",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+
+[tool.dagster]
+module_name = "voz_crawler.definitions"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
