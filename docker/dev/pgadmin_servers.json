@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Voz Crawler DB",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "voz_crawler",
+      "Username": "voz_user",
+      "SSLMode": "prefer"
+    }
+  }
+}

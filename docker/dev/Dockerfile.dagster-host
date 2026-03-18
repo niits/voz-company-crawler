@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Copy lockfile để pin version đúng với user-code image
+COPY pyproject.toml uv.lock ./
+
+# Export lock thành constraints, rồi cài đúng các package cần cho host
+RUN uv export --frozen --no-dev --no-emit-project -o /tmp/constraints.txt && \
+    uv venv && \
+    uv pip install \
+        --constraint /tmp/constraints.txt \
+        "dagster" \
+        "dagster-webserver" \
+        "dagster-postgres" \
+        "dagster-docker" && \
+    rm /tmp/constraints.txt pyproject.toml uv.lock
+
+ENV DAGSTER_HOME=/dagster_home
+
+ENV PATH="/app/.venv/bin:$PATH"
