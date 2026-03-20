@@ -34,6 +34,7 @@ run_launcher:
       - HTTP_TIMEOUT_SECONDS
       - HTTP_DELAY_SECONDS
       - FLARESOLVERR_URL
-
+    container_kwargs:
+      auto_remove: true
 telemetry:
   enabled: false

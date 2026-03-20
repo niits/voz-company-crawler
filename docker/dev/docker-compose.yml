@@ -5,6 +5,8 @@ volumes:
 networks:
   voz_net:
     driver: bridge
+  traefik-public:
+    external: true
 
 services:
   postgres:
@@ -30,23 +32,37 @@ services:
       timeout: 5s
       retries: 5
 
-  # pgadmin:
-  #   image: dpage/pgadmin4:latest
-  #   restart: unless-stopped
-  #   env_file:
-  #     - ./.env
-  #   environment:
-  #     PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
-  #     PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
-  #   volumes:
-  #     - ./pgadmin_servers.json:/pgadmin4/servers.json:ro
-  #   networks:
-  #     - voz_net
-  #   ports:
-  #     - "5050:80"
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+    volumes:
+      - ./pgadmin_servers.json:/pgadmin4/servers.json:ro
+    networks:
+      - voz_net
+      - traefik-public
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  dbhub:
+    image: bytebase/dbhub
+    restart: unless-stopped
+    command:
+      - "--transport=http"
+      - "--port=8080"
+      - "--dsn=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+    ports:
+      - "8080:8080"
+    networks:
+      - voz_net
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -94,8 +110,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - voz_net
-    ports:
-      - "3001:3000"
+      - traefik-public
     depends_on:
       postgres:
         condition: service_healthy
