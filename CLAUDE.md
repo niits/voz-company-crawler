@@ -9,7 +9,7 @@ Data pipeline crawling IT company reviews from the Voz.vn forum.
 | Orchestration | Dagster + dagster-dlt |
 | Ingestion | dlt (`dlt[postgres]`) |
 | Storage | PostgreSQL |
-| HTTP / CF bypass | cloudscraper |
+| HTTP / CF bypass | FlareSolverr (sidecar) |
 | Transformation | dbt (scaffold ready) |
 | Dependency mgmt | uv |
 
@@ -17,12 +17,28 @@ Data pipeline crawling IT company reviews from the Voz.vn forum.
 
 ```
 voz_crawler/
-  sources/voz_thread.py   dlt source: voz_page_source (single-page, stateless)
-  utils/html_parser.py    BeautifulSoup post extractor
-  utils/pagination.py     XenForo URL builder + page count discovery
-  definitions.py          Dagster: partitioned @dlt_assets, sensor, job
+  definitions.py              Thin re-export of defs (entry point for Dagster)
+  defs/
+    __init__.py               Assembles Definitions from sub-modules
+    ingestion/
+      assets.py               @dlt_assets: voz_page_posts_assets (partitioned)
+      jobs.py                 crawl_page_job, discover_pages_job, discover_pages_op
+      sensors.py              voz_discover_sensor, voz_crawl_sensor
+      resources.py            PostgresResource, CrawlerResource + pre-configured instances
+      partitions.py           DynamicPartitionsDefinition("voz_pages")
+    transformation/
+      __init__.py             Placeholder for future dbt definitions
+  sources/
+    voz_thread.py             dlt source: voz_page_source (single-page, stateless)
+  utils/
+    html_parser.py            BeautifulSoup post extractor
+    pagination.py             XenForo URL builder + page count discovery
 docs/
-  design-decisions.md     Architectural decisions with rationale
+  README.md                   Index of all documentation
+  design-decisions.md         Why key trade-offs were made (alternatives rejected)
+  features/
+    crawl-pipeline.md         End-to-end crawl pipeline: components, schema, operations
+    reply-graph.md            Reply graph pipeline design (ArangoDB, embeddings, LLM)
 ```
 
 ## Running Locally
@@ -84,6 +100,6 @@ On Cloudflare block (403/429/503), the sensor returns `SkipReason`; the asset ra
 3. Sources pre-defined in `dbt/models/sources.yml` pointing at `raw`
 4. `cd dbt && uv run dbt run`
 
-## Design Decisions
+## Documentation
 
-See [docs/design-decisions.md](docs/design-decisions.md).
+See [docs/README.md](docs/README.md) for the full index.
