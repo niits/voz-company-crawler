@@ -9,10 +9,12 @@ from .assets.reply_graph import (
     sync_posts_to_arango,
 )
 from .jobs.crawl import crawl_page_job, discover_pages_job
+from .jobs.graph import reply_graph_job
 from .resources.arango import ArangoResource
 from .resources.crawler import CrawlerResource
 from .resources.postgres import PostgresResource
 from .sensors.crawl import voz_crawl_sensor, voz_discover_sensor
+from .sensors.graph import reply_graph_sensor
 
 postgres_resource = PostgresResource(
     user=EnvVar("POSTGRES_USER"),
@@ -38,8 +40,8 @@ arango_resource = ArangoResource(
 
 defs = Definitions(
     assets=[voz_page_posts_assets, sync_posts_to_arango, extract_explicit_edges, compute_embeddings, detect_implicit_edges],
-    jobs=[crawl_page_job, discover_pages_job],
-    sensors=[voz_discover_sensor, voz_crawl_sensor],
+    jobs=[crawl_page_job, discover_pages_job, reply_graph_job],
+    sensors=[voz_discover_sensor, voz_crawl_sensor, reply_graph_sensor],
     resources={
         "dagster_dlt": DagsterDltResource(),
         "postgres": postgres_resource,
