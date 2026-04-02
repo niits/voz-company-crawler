@@ -48,5 +48,5 @@ def test_second_quote_ordinal():
 
 
 def test_no_quotes_returns_empty():
-    edges = extract_quote_edges("<article class='message' data-author='x' id='js-post-1'></article>")
-    assert edges == []
+    html = "<article class='message' data-author='x' id='js-post-1'></article>"
+    assert extract_quote_edges(html) == []

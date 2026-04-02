@@ -39,7 +39,13 @@ arango_resource = ArangoResource(
 )
 
 defs = Definitions(
-    assets=[voz_page_posts_assets, sync_posts_to_arango, extract_explicit_edges, compute_embeddings, detect_implicit_edges],
+    assets=[
+        voz_page_posts_assets,
+        sync_posts_to_arango,
+        extract_explicit_edges,
+        compute_embeddings,
+        detect_implicit_edges,
+    ],
     jobs=[crawl_page_job, discover_pages_job, reply_graph_job],
     sensors=[voz_discover_sensor, voz_crawl_sensor, reply_graph_sensor],
     resources={
