@@ -1,6 +1,7 @@
 import os
 
 from dagster import AssetExecutionContext, MetadataValue, asset
+from openai import OpenAI
 from sqlalchemy import create_engine, text
 
 from voz_crawler.utils.arango_setup import ensure_schema
@@ -8,6 +9,9 @@ from voz_crawler.utils.html_parser import extract_quote_edges
 
 from ..resources.arango import ArangoResource
 from ..resources.postgres import PostgresResource
+
+_EMBED_MODEL = "text-embedding-3-small"
+_EMBED_BATCH = 20
 
 
 @asset(
@@ -120,3 +124,44 @@ def extract_explicit_edges(
 
     context.log.info(f"Upserted {count} quote edges.")
     context.add_output_metadata({"edges_processed": MetadataValue.int(count)})
+
+
+@asset(
+    deps=["sync_posts_to_arango"],
+    group_name="reply_graph",
+    description="Batch-embed posts without embeddings using text-embedding-3-small.",
+)
+def compute_embeddings(
+    context: AssetExecutionContext,
+    arango: ArangoResource,
+) -> None:
+    db = arango.get_client()
+
+    cursor = db.aql.execute(
+        "FOR p IN Posts FILTER p.embedding == null RETURN {_key: p._key, text: p.content_text}"
+    )
+    pending = list(cursor)
+    if not pending:
+        context.log.info("No posts need embeddings.")
+        context.add_output_metadata({"records_processed": MetadataValue.int(0)})
+        return
+
+    context.log.info(f"Embedding {len(pending)} posts.")
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    posts_col = db.collection("Posts")
+    total = 0
+
+    for i in range(0, len(pending), _EMBED_BATCH):
+        batch = pending[i : i + _EMBED_BATCH]
+        texts = [p["text"] or "" for p in batch]
+        response = client.embeddings.create(model=_EMBED_MODEL, input=texts)
+        for post, emb_obj in zip(batch, response.data):
+            posts_col.update({
+                "_key": post["_key"],
+                "embedding": emb_obj.embedding,
+                "embedding_model": _EMBED_MODEL,
+            })
+        total += len(batch)
+
+    context.log.info(f"Embedded {total} posts.")
+    context.add_output_metadata({"records_processed": MetadataValue.int(total)})
