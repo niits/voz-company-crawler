@@ -34,6 +34,7 @@ crawler_resource = CrawlerResource(
 arango_resource = ArangoResource(
     host=EnvVar("ARANGO_HOST"),
     port=EnvVar.int("ARANGO_PORT"),
+    username=EnvVar("ARANGO_USER"),
     password=EnvVar("ARANGO_ROOT_PASSWORD"),
     db=EnvVar("ARANGO_DB"),
 )
