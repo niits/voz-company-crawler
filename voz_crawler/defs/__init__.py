@@ -3,6 +3,7 @@ from dagster_dlt import DagsterDltResource
 
 from .assets.ingestion import voz_page_posts_assets
 from .jobs.crawl import crawl_page_job, discover_pages_job
+from .resources.arango import ArangoResource
 from .resources.crawler import CrawlerResource
 from .resources.postgres import PostgresResource
 from .sensors.crawl import voz_crawl_sensor, voz_discover_sensor
@@ -22,6 +23,13 @@ crawler_resource = CrawlerResource(
     http_timeout_seconds=EnvVar.int("HTTP_TIMEOUT_SECONDS"),
 )
 
+arango_resource = ArangoResource(
+    host=EnvVar("ARANGO_HOST"),
+    port=EnvVar.int("ARANGO_PORT"),
+    password=EnvVar("ARANGO_ROOT_PASSWORD"),
+    db=EnvVar("ARANGO_DB"),
+)
+
 defs = Definitions(
     assets=[voz_page_posts_assets],
     jobs=[crawl_page_job, discover_pages_job],
@@ -30,5 +38,6 @@ defs = Definitions(
         "dagster_dlt": DagsterDltResource(),
         "postgres": postgres_resource,
         "crawler": crawler_resource,
+        "arango": arango_resource,
     },
 )
