@@ -1,16 +1,10 @@
-from dagster import (
-    AssetSelection,
-    OpExecutionContext,
-    define_asset_job,
-    job,
-    op,
-)
+from dagster import AssetSelection, OpExecutionContext, define_asset_job, job, op
 
 from voz_crawler.sources.voz_thread import fetch_via_flaresolverr, is_cf_block
 from voz_crawler.utils.pagination import build_page_url, discover_total_pages
 
-from .partitions import voz_pages_partitions
-from .resources import CrawlerResource
+from ..partitions import voz_pages_partitions
+from ..resources.crawler import CrawlerResource
 
 crawl_page_job = define_asset_job(
     name="crawl_page_job",
@@ -22,11 +16,7 @@ crawl_page_job = define_asset_job(
 
 @op
 def discover_pages_op(context: OpExecutionContext, crawler: CrawlerResource) -> int:
-    """Fetch page 1 to discover total pages, then register new partition keys.
-
-    Safe to run repeatedly — only adds keys that don't exist yet.
-    Raises RuntimeError on Cloudflare block so the run shows as failed.
-    """
+    """Fetch page 1 to discover total pages, then register new partition keys."""
     page1_url = build_page_url(crawler.thread_url, 1)
     status_code, html = fetch_via_flaresolverr(
         page1_url, crawler.flaresolverr_url, timeout=crawler.http_timeout_seconds
@@ -49,9 +39,11 @@ def discover_pages_op(context: OpExecutionContext, crawler: CrawlerResource) -> 
     return total_pages
 
 
-@job(description=(
-    "Discover new Voz thread pages and register them as partitions. "
-    "Run manually or before the first crawl."
-))
+@job(
+    description=(
+        "Discover new Voz thread pages and register them as partitions. "
+        "Run manually or before the first crawl."
+    )
+)
 def discover_pages_job():
     discover_pages_op()

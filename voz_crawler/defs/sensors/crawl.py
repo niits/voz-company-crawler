@@ -11,8 +11,8 @@ from dagster import (
     sensor,
 )
 
-from .assets import _POSTS_ASSET_KEY
-from .jobs import crawl_page_job, discover_pages_job
+from ..assets.ingestion import _POSTS_ASSET_KEY
+from ..jobs.crawl import crawl_page_job, discover_pages_job
 
 
 @sensor(
@@ -22,7 +22,6 @@ from .jobs import crawl_page_job, discover_pages_job
     description="Triggers discover_pages_job every 6 hours to pick up new thread pages.",
 )
 def voz_discover_sensor(context: SensorEvaluationContext) -> SensorResult:
-    # One run per evaluation window — run_key prevents duplicate runs within the window.
     run_key = f"discover-{datetime.date.today().isoformat()}-{context.cursor or '0'}"
     return SensorResult(run_requests=[RunRequest(run_key=run_key)])
 
@@ -38,31 +37,30 @@ def voz_discover_sensor(context: SensorEvaluationContext) -> SensorResult:
     ),
 )
 def voz_crawl_sensor(context: RunStatusSensorContext) -> SensorResult:
-    all_keys: list[str] = sorted(
-        context.instance.get_dynamic_partitions("voz_pages"), key=int
-    )
+    all_keys: list[str] = sorted(context.instance.get_dynamic_partitions("voz_pages"), key=int)
     if not all_keys:
         return SensorResult(skip_reason="No partitions registered yet.")
 
     last_page_key = all_keys[-1]
     materialized: set[str] = context.instance.get_materialized_partitions(_POSTS_ASSET_KEY)
-
     today = datetime.date.today().isoformat()
     run_requests: list[RunRequest] = []
 
     for page_key in all_keys:
         if page_key == last_page_key:
-            # Always re-crawl last page; daily run_key re-fires even after materialization.
-            run_requests.append(RunRequest(
-                run_key=f"page-{page_key}-{today}",
-                partition_key=page_key,
-            ))
+            run_requests.append(
+                RunRequest(
+                    run_key=f"page-{page_key}-{today}",
+                    partition_key=page_key,
+                )
+            )
         elif page_key not in materialized:
-            # Historical page: stable run_key fires exactly once.
-            run_requests.append(RunRequest(
-                run_key=f"page-{page_key}",
-                partition_key=page_key,
-            ))
+            run_requests.append(
+                RunRequest(
+                    run_key=f"page-{page_key}",
+                    partition_key=page_key,
+                )
+            )
 
     if not run_requests:
         return SensorResult(

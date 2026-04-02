@@ -16,8 +16,8 @@ HTTP fetching is delegated to FlareSolverr, which runs a real Chrome browser to
 bypass Cloudflare challenges. FlareSolverr must be reachable at FLARESOLVERR_URL.
 """
 
-import requests
 import dlt
+import requests
 
 from voz_crawler.utils.html_parser import extract_posts
 
@@ -66,11 +66,11 @@ def voz_page_posts(
 
     Cloudflare block raises RuntimeError, bubbling up to Dagster as a run failure.
     """
-    status_code, html = fetch_via_flaresolverr(page_url, flaresolverr_url, timeout=http_timeout_seconds)
+    status_code, html = fetch_via_flaresolverr(
+        page_url, flaresolverr_url, timeout=http_timeout_seconds
+    )
     if is_cf_block(status_code, html):
-        raise RuntimeError(
-            f"Cloudflare blocked {page_url} (HTTP {status_code}). Try again later."
-        )
+        raise RuntimeError(f"Cloudflare blocked {page_url} (HTTP {status_code}). Try again later.")
 
     for post in extract_posts(html):
         if not post["post_id_on_site"]:

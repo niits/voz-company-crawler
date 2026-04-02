@@ -74,3 +74,37 @@ def _extract_body(article) -> tuple[str, str]:
     raw_html = str(body)
     raw_text = body.get_text(separator="\n", strip=True)
     return raw_html, raw_text
+
+
+def extract_quote_edges(html: str) -> list[dict]:
+    """Extract explicit quote edges from XenForo HTML.
+
+    Parses all <blockquote data-source="post: <id>"> elements and returns
+    one edge dict per quote. Used by the extract_explicit_edges Dagster asset.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    edges = []
+
+    for article in soup.select("article.message[data-author]"):
+        from_post_id = _extract_post_id(article)
+        if not from_post_id:
+            continue
+        source_author = article.get("data-author", "").strip() or None
+
+        for ordinal, quote in enumerate(
+            article.select("blockquote[data-source]"), start=1
+        ):
+            raw_source = quote.get("data-source", "")
+            if not raw_source.startswith("post: "):
+                continue
+            to_post_id = raw_source[len("post: "):].strip()
+            target_author = quote.get("data-quote", "").strip() or None
+            edges.append({
+                "from_post_id": from_post_id,
+                "to_post_id": to_post_id,
+                "quote_ordinal": ordinal,
+                "source_author": source_author,
+                "target_author": target_author,
+            })
+
+    return edges
