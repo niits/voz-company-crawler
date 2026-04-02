@@ -1,3 +1,33 @@
+_VECTOR_N_LISTS = 100
+
+
+def _ensure_vector_index(db) -> None:
+    """Create the vector index on Posts.embedding if enough documents exist.
+
+    FAISS IVF index requires at least nLists training points. Skips silently
+    on empty or small collections — the index will be created on a later run
+    once enough embedded posts are present.
+    """
+    posts_col = db.collection("Posts")
+    existing_types = {idx["type"] for idx in posts_col.indexes()}
+    if "vector" in existing_types:
+        return
+
+    count = posts_col.count()
+    if count < _VECTOR_N_LISTS:
+        return  # Not enough data yet — will retry on next asset run
+
+    posts_col.add_index({
+        "type": "vector",
+        "fields": ["embedding"],
+        "params": {
+            "metric": "cosine",
+            "dimension": 1536,
+            "nLists": _VECTOR_N_LISTS,
+        },
+    })
+
+
 def ensure_schema(db) -> None:
     """Idempotently create ArangoDB collections, named graph, and vector index.
 
@@ -29,15 +59,4 @@ def ensure_schema(db) -> None:
             ],
         )
 
-    posts_col = db.collection("Posts")
-    existing_types = {idx["type"] for idx in posts_col.indexes()}
-    if "vector" not in existing_types:
-        posts_col.add_index({
-            "type": "vector",
-            "fields": ["embedding"],
-            "params": {
-                "metric": "cosine",
-                "dimension": 1536,
-                "nLists": 100,
-            },
-        })
+    _ensure_vector_index(db)

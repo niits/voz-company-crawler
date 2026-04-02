@@ -142,6 +142,7 @@ services:
   arangodb:
     image: arangodb:3.12.5
     restart: unless-stopped
+    command: ["arangod", "--experimental-vector-index", "true"]
     env_file:
       - ./.env
     environment:
