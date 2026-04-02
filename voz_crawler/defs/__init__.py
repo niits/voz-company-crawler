@@ -2,7 +2,12 @@ from dagster import Definitions, EnvVar
 from dagster_dlt import DagsterDltResource
 
 from .assets.ingestion import voz_page_posts_assets
-from .assets.reply_graph import compute_embeddings, extract_explicit_edges, sync_posts_to_arango
+from .assets.reply_graph import (
+    compute_embeddings,
+    detect_implicit_edges,
+    extract_explicit_edges,
+    sync_posts_to_arango,
+)
 from .jobs.crawl import crawl_page_job, discover_pages_job
 from .resources.arango import ArangoResource
 from .resources.crawler import CrawlerResource
@@ -32,7 +37,7 @@ arango_resource = ArangoResource(
 )
 
 defs = Definitions(
-    assets=[voz_page_posts_assets, sync_posts_to_arango, extract_explicit_edges, compute_embeddings],
+    assets=[voz_page_posts_assets, sync_posts_to_arango, extract_explicit_edges, compute_embeddings, detect_implicit_edges],
     jobs=[crawl_page_job, discover_pages_job],
     sensors=[voz_discover_sensor, voz_crawl_sensor],
     resources={

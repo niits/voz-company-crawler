@@ -1,3 +1,4 @@
+import json
 import os
 
 from dagster import AssetExecutionContext, MetadataValue, asset
@@ -12,6 +13,38 @@ from ..resources.postgres import PostgresResource
 
 _EMBED_MODEL = "text-embedding-3-small"
 _EMBED_BATCH = 20
+
+_IMPLICIT_AQL = """
+FOR doc IN Posts
+  FILTER doc.posted_at >= DATE_SUBTRACT(@post_time, 10, "hour")
+  FILTER doc.posted_at < @post_time
+  FILTER doc.author_username != @author
+  FILTER doc.embedding != null
+  SORT APPROX_NEAR_COSINE(doc.embedding, @query_embedding) DESC
+  LIMIT 10
+  LET sim = COSINE_SIMILARITY(doc.embedding, @query_embedding)
+  FILTER sim >= 0.65
+  LET delta_h = DATE_DIFF(doc.posted_at, @post_time, "h")
+  RETURN MERGE(doc, {
+    similarity: sim,
+    temporal_score: EXP(-delta_h / 1.36),
+    combined_score: 0.6 * sim + 0.4 * EXP(-delta_h / 1.36)
+  })
+"""
+
+_LLM_PROMPT = """\
+Below are {n} consecutive posts from a Vietnamese IT company review thread.
+
+{posts}
+
+Identify pairs (A, B) where post B is an implicit reply to post A (the user did not \
+press the quote button but is directly responding to the content of post A).
+
+Only return pairs with confidence >= 0.7. Do not create an edge if an HTML quote already exists.
+
+Output JSON only:
+[{{"from": <post_id>, "to": <post_id>, "confidence": 0.85, "reason": "..."}}]
+"""
 
 
 @asset(
@@ -165,3 +198,108 @@ def compute_embeddings(
 
     context.log.info(f"Embedded {total} posts.")
     context.add_output_metadata({"records_processed": MetadataValue.int(total)})
+
+
+@asset(
+    deps=["compute_embeddings"],
+    group_name="reply_graph",
+    description="Detect implicit replies via temporal+ANN+LLM and upsert into implicit_replies.",
+)
+def detect_implicit_edges(
+    context: AssetExecutionContext,
+    arango: ArangoResource,
+) -> None:
+    db = arango.get_client()
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+    all_cursor = db.aql.execute(
+        "FOR p IN Posts FILTER p.embedding != null "
+        "SORT p.posted_at ASC "
+        "RETURN {_key: p._key, post_id: p.post_id, author_username: p.author_username, "
+        "posted_at: p.posted_at, content_text: p.content_text, embedding: p.embedding}"
+    )
+    posts = list(all_cursor)
+    if not posts:
+        context.log.info("No embedded posts to process.")
+        context.add_output_metadata({"edges_upserted": MetadataValue.int(0)})
+        return
+
+    # Build set of existing explicit quote pairs for dedup
+    existing_quotes: set[tuple[str, str]] = set()
+    qcursor = db.aql.execute("FOR e IN quotes RETURN {from: e._from, to: e._to}")
+    for edge in qcursor:
+        existing_quotes.add((edge["from"], edge["to"]))
+
+    implicit_col = db.collection("implicit_replies")
+    total_edges = 0
+    PAGE = 20
+
+    for page_start in range(0, len(posts), PAGE):
+        page = posts[page_start : page_start + PAGE]
+        page = [p for p in page if len(p.get("content_text") or "") >= 20]
+        if not page:
+            continue
+
+        # Check if any candidates exist for this page
+        candidates_exist = False
+        for post in page:
+            cands = list(db.aql.execute(
+                _IMPLICIT_AQL,
+                bind_vars={
+                    "post_time": post["posted_at"],
+                    "author": post["author_username"],
+                    "query_embedding": post["embedding"],
+                },
+            ))
+            if cands:
+                candidates_exist = True
+                break
+
+        if not candidates_exist:
+            continue
+
+        # Stage 3: single LLM call for the full page
+        posts_text = "\n\n".join(
+            f"[{p['post_id']}] {p['author_username']}: {(p['content_text'] or '')[:300]}"
+            for p in page
+        )
+        prompt = _LLM_PROMPT.format(n=len(page), posts=posts_text)
+
+        pairs: list[dict] = []
+        for attempt in range(2):
+            try:
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                )
+                pairs = json.loads(resp.choices[0].message.content.strip())
+                break
+            except Exception as exc:
+                if attempt == 1:
+                    context.log.warning(
+                        f"LLM call failed for page at post {page[0]['post_id']}: {exc}. Skipping."
+                    )
+                    pairs = []
+
+        for pair in pairs:
+            if pair.get("confidence", 0) < 0.75:
+                continue
+            from_key = f"Posts/{pair['from']}"
+            to_key = f"Posts/{pair['to']}"
+            if (from_key, to_key) in existing_quotes:
+                continue
+            implicit_col.insert(
+                {
+                    "_from": from_key,
+                    "_to": to_key,
+                    "llm_confidence": pair["confidence"],
+                    "llm_reasoning": pair.get("reason", ""),
+                    "method": "semantic",
+                },
+                overwrite=True,
+            )
+            total_edges += 1
+
+    context.log.info(f"Upserted {total_edges} implicit reply edges.")
+    context.add_output_metadata({"edges_upserted": MetadataValue.int(total_edges)})
