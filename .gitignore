@@ -27,3 +27,6 @@ dbt/profiles.yml
 # OS
 .DS_Store
 .tmp*
+
+# Git worktrees
+.worktrees/
