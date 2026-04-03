@@ -31,7 +31,8 @@ class Fetcher:
         solution = data["solution"]
         return solution["status"], solution["response"]
 
-    def is_cf_block(self, status_code: int, html: str) -> bool:
+    @staticmethod
+    def is_cf_block(status_code: int, html: str) -> bool:
         if status_code in _CF_BLOCK_STATUSES:
             snippet = html[:2000]
             return any(m in snippet for m in _CF_BLOCK_MARKERS)

@@ -51,6 +51,17 @@ def test_is_cf_block_false_for_403_without_marker():
     assert fetcher.is_cf_block(403, "<html>not cloudflare</html>") is False
 
 
+def test_fetch_raises_on_http_error():
+    import pytest
+    from requests.exceptions import HTTPError
+    fetcher = _make_fetcher()
+    mock_response = MagicMock()
+    mock_response.raise_for_status.side_effect = HTTPError("503")
+    with patch.object(fetcher._session, "post", return_value=mock_response):
+        with pytest.raises(HTTPError):
+            fetcher.fetch("http://example.com")
+
+
 def test_session_reused_across_calls():
     fetcher = _make_fetcher()
     mock_response = MagicMock()
