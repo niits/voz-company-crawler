@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from voz_crawler.utils.arango_setup import ensure_schema
+from voz_crawler.core.graph.schema import ensure_schema
 
 
 def _make_mock_db(has_collections=(), has_graph=False, post_count=200):

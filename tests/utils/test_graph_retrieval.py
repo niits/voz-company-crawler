@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from voz_crawler.utils.graph_retrieval import get_thread_context
+from voz_crawler.core.graph.retrieval import get_thread_context
 
 
 def _make_arango_db(posts):
