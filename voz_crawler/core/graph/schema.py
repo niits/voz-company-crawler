@@ -7,7 +7,7 @@ def _ensure_vector_index(db) -> None:
     existing_types = {idx["type"] for idx in posts_col.indexes()}
     if "vector" in existing_types:
         return
-    count = posts_col.count()
+    count = int(posts_col.count())
     if count < _VECTOR_N_LISTS:
         return
     posts_col.add_index({
