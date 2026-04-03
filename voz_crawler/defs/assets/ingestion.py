@@ -64,18 +64,8 @@ def voz_page_posts_assets(
         destination=dlt.destinations.postgres(credentials=postgres.url),
         dataset_name="raw",
     )
-    try:
-        yield from dagster_dlt.run(
-            context=context,
-            dlt_source=runtime_source,
-            dlt_pipeline=runtime_pipeline,
-        )
-    finally:
-        # Dispose SQLAlchemy engine to release pooled connections back to the OS.
-        # Without this, each run's QueuePool (default: 5+10 connections) lingers
-        # until GC, causing "too many clients" across sequential partition runs.
-        try:
-            with runtime_pipeline.destination_client() as client:
-                client.sql_client._engine.dispose()
-        except Exception as e:
-            context.log.warning(f"Failed to dispose SQLAlchemy engine: {e}")
+    yield from dagster_dlt.run(
+        context=context,
+        dlt_source=runtime_source,
+        dlt_pipeline=runtime_pipeline,
+    )
