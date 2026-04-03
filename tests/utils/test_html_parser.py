@@ -1,4 +1,4 @@
-from voz_crawler.utils.html_parser import extract_quote_edges
+from voz_crawler.core.crawl.parser import extract_quote_edges
 
 _SAMPLE_HTML = """
 <article class="message" data-author="darkrose" id="js-post-21998630">
