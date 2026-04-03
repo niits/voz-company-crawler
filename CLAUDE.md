@@ -9,7 +9,7 @@ Data pipeline crawling IT company reviews from the Voz.vn forum.
 | Orchestration | Dagster + dagster-dlt |
 | Ingestion | dlt (`dlt[postgres]`) |
 | Storage | PostgreSQL |
-| HTTP / CF bypass | cloudscraper |
+| HTTP / CF bypass | FlareSolverr (Chrome headless sidecar) |
 | Transformation | dbt (scaffold ready) |
 | Dependency mgmt | uv |
 
@@ -17,10 +17,22 @@ Data pipeline crawling IT company reviews from the Voz.vn forum.
 
 ```
 voz_crawler/
-  sources/voz_thread.py   dlt source: voz_page_source (single-page, stateless)
-  utils/html_parser.py    BeautifulSoup post extractor
-  utils/pagination.py     XenForo URL builder + page count discovery
-  definitions.py          Dagster: partitioned @dlt_assets, sensor, job
+  core/
+    ingestion/
+      html_source/
+        html_parser.py    BeautifulSoup post extractor (extract_posts)
+        pagination.py     XenForo URL builder + page count discovery
+  defs/
+    assets/ingestion.py   @dlt_assets: voz_page_posts_assets (partitioned)
+    jobs/ingestion.py     crawl_page_job + discover_pages_job
+    ops/ingestion.py      discover_pages_op (registers dynamic partitions)
+    resources/
+      crawler_resource.py CrawlerResource (thread_url, flaresolverr_url, timeout)
+      postgres_resource.py PostgresResource (assembles SQLAlchemy URL)
+    sensors/ingestion.py  voz_discover_sensor + voz_crawl_sensor
+  dlt/
+    sources/voz_thread.py dlt source: voz_page_source + FlareSolverr fetch helpers
+  definitions.py          Dagster Definitions entry point
 docs/
   design-decisions.md     Architectural decisions with rationale
 ```
@@ -58,23 +70,28 @@ Key table (auto-created by dlt on first run):
 
 ## Crawl Strategy
 
-A **sensor** (`voz_crawl_sensor`) runs hourly:
-1. Fetches page 1 to discover `total_pages`
-2. Adds new page numbers to `DynamicPartitionsDefinition("voz_pages")`
-3. Checks Dagster's asset catalog for already-materialized partitions
-4. Queues `RunRequest` for each unmaterialized page + the last page (always re-crawled daily)
+Two sensors work in tandem:
+
+**`voz_discover_sensor`** (every 6 hours) triggers `discover_pages_job`:
+1. Fetches page 1 via FlareSolverr to discover `total_pages`
+2. Registers new page numbers into `DynamicPartitionsDefinition("voz_pages")`
+
+**`voz_crawl_sensor`** (`run_status_sensor`, fires after `discover_pages_job` succeeds):
+1. Checks Dagster's asset catalog for already-materialized partitions
+2. Queues `RunRequest` for each unmaterialized page + the last page (always re-crawled daily)
 
 Each run materializes one partition → calls `voz_page_source(page_url)` → parses posts → merges into `raw.voz__posts` by `post_id_on_site`. No dlt cursor state needed.
 
-On Cloudflare block (403/429/503), the sensor returns `SkipReason`; the asset raises `RuntimeError`. Both are safe — next evaluation retries automatically.
+On Cloudflare block (403/429/503), the asset raises `RuntimeError`. Safe — next sensor evaluation retries automatically.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `VOZ_THREAD_URL` | — | Full URL to the Voz thread |
+| `FLARESOLVERR_URL` | — | FlareSolverr sidecar URL (e.g. `http://flaresolverr:8191`) |
 | `HTTP_DELAY_SECONDS` | `2` | Retained for env compat (unused in asset) |
-| `HTTP_TIMEOUT_SECONDS` | `30` | Per-request timeout |
+| `HTTP_TIMEOUT_SECONDS` | `60` | Per-request timeout |
 | `OPENAI_API_KEY` | — | Future LLM extraction |
 
 ## Adding dbt Models
