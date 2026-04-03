@@ -1,4 +1,19 @@
+import re
+
 from bs4 import BeautifulSoup
+
+
+def extract_thread_id(thread_url: str) -> str:
+    """Extract the numeric thread ID from a XenForo thread URL.
+
+    XenForo URL pattern: https://voz.vn/t/slug-text.677450/
+    The thread ID is the integer after the last dot before the trailing slash.
+    Raises ValueError if the URL does not match the expected pattern.
+    """
+    match = re.search(r"\.(\d+)/?$", thread_url.rstrip("/"))
+    if not match:
+        raise ValueError(f"Cannot extract thread ID from URL: {thread_url!r}")
+    return match.group(1)
 
 
 def build_page_url(base_thread_url: str, page_number: int) -> str:

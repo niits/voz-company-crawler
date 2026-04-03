@@ -48,7 +48,9 @@ def voz_page_posts_assets(
     The partition key is the page number as a string (e.g. "1", "42").
     Idempotent via write_disposition='merge' + primary_key='post_id_on_site'.
     """
-    page_num = int(context.partition_key)
+    # Partition key format: "{thread_id}:{page_number}" e.g. "677450:42"
+    _, page_num_str = context.partition_key.rsplit(":", 1)
+    page_num = int(page_num_str)
     page_url = build_page_url(crawler.thread_url, page_num)
     context.log.info(f"Crawling page {page_num}: {page_url}")
 

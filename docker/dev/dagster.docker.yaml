@@ -2,7 +2,11 @@ run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
   config:
-    max_concurrent_runs: 1
+    max_concurrent_runs: 20
+    tag_concurrency_limits:
+      - key: "dagster/concurrency_key"
+        value: "voz_crawl"
+        limit: 1
 
 storage:
   postgres:
@@ -18,23 +22,8 @@ storage:
       port: 5432
 
 run_launcher:
-  module: dagster_docker
-  class: DockerRunLauncher
-  config:
-    image: voz-user-code:latest
-    networks:
-      - dev_voz_net
-    env_vars:
-      - POSTGRES_USER
-      - POSTGRES_PASSWORD
-      - POSTGRES_HOST
-      - POSTGRES_PORT
-      - POSTGRES_DB
-      - VOZ_THREAD_URL
-      - HTTP_TIMEOUT_SECONDS
-      - HTTP_DELAY_SECONDS
-      - FLARESOLVERR_URL
-    container_kwargs:
-      auto_remove: true
+  module: dagster.core.launcher
+  class: DefaultRunLauncher
+
 telemetry:
   enabled: false

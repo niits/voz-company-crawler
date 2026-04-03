@@ -352,6 +352,19 @@ wheels = [
 ]
 
 [[package]]
+name = "dagster-openai"
+version = "0.28.19"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dagster" },
+    { name = "openai" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a3/e1/41826686c191375a026aa9f9ac8214f1824e350fab32fb5e6d47884e8d90/dagster_openai-0.28.19.tar.gz", hash = "sha256:ce75716657e717f2fb91fe944285ada7dc2eb1090a9ca5840f413bebbc32b383", size = 11449, upload-time = "2026-03-12T17:33:18.095Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d4/23/81b65341bded9bbc7f4cfab525db2d0aee93799c17f97119d32fdc869b66/dagster_openai-0.28.19-py2.py3-none-any.whl", hash = "sha256:cd674f320d0510695f5baca96eabe49eae08b27ed05cb6075588e7e6aa648d02", size = 9418, upload-time = "2026-03-12T17:33:17.265Z" },
+]
+
+[[package]]
 name = "dagster-pipes"
 version = "1.12.19"
 source = { registry = "https://pypi.org/simple" }
@@ -2196,6 +2209,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyjwt"
+version = "2.12.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/27/a3b6e5bf6ff856d2509292e95c8f57f0df7017cf5394921fc4e4ef40308a/pyjwt-2.12.1.tar.gz", hash = "sha256:c74a7a2adf861c04d002db713dd85f84beb242228e671280bf709d765b03672b", size = 102564, upload-time = "2026-03-13T19:27:37.25Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/7a/8dd906bd22e79e47397a61742927f6747fe93242ef86645ee9092e610244/pyjwt-2.12.1-py3-none-any.whl", hash = "sha256:28ca37c070cad8ba8cd9790cd940535d40274d22f80ab87f3ac6a713e6e8454c", size = 29726, upload-time = "2026-03-13T19:27:35.677Z" },
+]
+
+[[package]]
 name = "pyreadline3"
 version = "3.5.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2218,6 +2240,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d1/db/7ef3487e0fb0049ddb5ce41d3a49c235bf9ad299b6a25d5780a89f19230f/pytest-9.0.2.tar.gz", hash = "sha256:75186651a92bd89611d1d9fc20f0b4345fd827c41ccd5c299a868a05d70edf11", size = 1568901, upload-time = "2025-12-06T21:30:51.014Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3b/ab/b3226f0bd7cdcf710fbede2b3548584366da3b19b5021e74f5bde2a8fa3f/pytest-9.0.2-py3-none-any.whl", hash = "sha256:711ffd45bf766d5264d487b917733b453d917afd2b0ad65223959f59089f875b", size = 374801, upload-time = "2025-12-06T21:30:49.154Z" },
+]
+
+[[package]]
+name = "python-arango"
+version = "8.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pyjwt" },
+    { name = "requests" },
+    { name = "requests-toolbelt" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/7a/e5a09446f8e0ca69269bbb5ddefcdfbdcfc8cfb019de382f70e4ca899170/python_arango-8.3.1.tar.gz", hash = "sha256:38d3c1f5173c99fe3c17b386963d441c96b0d38dc111353eebddbf9088459cdd", size = 154810, upload-time = "2026-03-23T06:01:11.472Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/78/e60b1b8bc8d78908c849dd320d683be3d92bf3eb7f3396a7ffd53ba9ea71/python_arango-8.3.1-py3-none-any.whl", hash = "sha256:964012b3a239bddaa6ca9851659bf74817128fdeab6fcb6e5abef0f6b817a536", size = 116245, upload-time = "2026-03-23T06:01:10.072Z" },
 ]
 
 [[package]]
@@ -3180,12 +3218,15 @@ dependencies = [
     { name = "dagster-dbt" },
     { name = "dagster-dlt" },
     { name = "dagster-docker" },
+    { name = "dagster-openai" },
     { name = "dagster-postgres" },
     { name = "dagster-webserver" },
     { name = "dlt", extra = ["postgres"] },
     { name = "lxml" },
     { name = "openai" },
+    { name = "python-arango" },
     { name = "requests" },
+    { name = "sqlalchemy" },
 ]
 
 [package.optional-dependencies]
@@ -3207,6 +3248,7 @@ requires-dist = [
     { name = "dagster-dbt" },
     { name = "dagster-dlt", specifier = ">=0.28.19" },
     { name = "dagster-docker", specifier = ">=0.28.19" },
+    { name = "dagster-openai" },
     { name = "dagster-postgres", specifier = ">=0.28.19" },
     { name = "dagster-webserver" },
     { name = "dlt", extras = ["postgres"], specifier = ">=1.0" },
@@ -3214,8 +3256,10 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "openai", specifier = ">=1.0" },
     { name = "pytest", marker = "extra == 'dev'" },
+    { name = "python-arango", specifier = ">=8.0" },
     { name = "requests", specifier = ">=2.32" },
     { name = "ruff", marker = "extra == 'dev'" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
 ]
 provides-extras = ["dev"]
 
