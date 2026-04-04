@@ -1,7 +1,6 @@
 from dagster import (
     AssetDep,
     AssetExecutionContext,
-    AutomationCondition,
     IdentityPartitionMapping,
     MaterializeResult,
     MetadataValue,
@@ -9,25 +8,13 @@ from dagster import (
 )
 from dagster_openai import OpenAIResource
 
-from voz_crawler.core.graph.arango_setup import ensure_collections_and_graph
-from voz_crawler.core.graph.edge_sync import (
-    build_edges,
-    drop_partition_edges,
-    fetch_posts_with_blockquotes,
-    insert_edges,
-)
+from voz_crawler.core.graph.edge_sync import build_edges
 from voz_crawler.core.graph.embedding_sync import (
     EMBED_BATCH_SIZE,
     EMBEDDING_MODEL,
     embed_and_update,
-    fetch_posts_needing_embedding,
 )
-from voz_crawler.core.graph.post_sync import (
-    build_upsert_docs,
-    fetch_posts,
-    get_existing_hashes,
-    upsert_posts,
-)
+from voz_crawler.core.graph.post_sync import build_upsert_docs
 from voz_crawler.core.ingestion.html_source.pagination import build_page_url
 from voz_crawler.defs.assets.ingestion import voz_page_posts_assets, voz_pages_partitions
 from voz_crawler.defs.resources.arango_resource import ArangoDBResource
@@ -47,7 +34,6 @@ def _page_url(partition_key: str, thread_url: str) -> str:
     partitions_def=voz_pages_partitions,
     group_name="reply_graph",
     deps=[_upstream_dep],
-    automation_condition=AutomationCondition.eager(),
 )
 def sync_posts_to_arango(
     context: AssetExecutionContext,
@@ -70,7 +56,7 @@ def sync_posts_to_arango(
         f" page_number={page_number} page_url={page_url}"
     )
 
-    rows = fetch_posts(postgres.url, page_url)
+    rows = postgres.get_repository().fetch_posts(page_url)
     context.log.info(f"[sync_posts_to_arango] fetched {len(rows)} posts from PostgreSQL")
 
     if not rows:
@@ -85,10 +71,8 @@ def sync_posts_to_arango(
             }
         )
 
-    db = arango.get_db()
-    ensure_collections_and_graph(db)
-
-    existing_hashes = get_existing_hashes(db, partition_key)
+    arango_repo = arango.get_repository()
+    existing_hashes = arango_repo.get_existing_hashes(partition_key)
     context.log.info(
         f"[sync_posts_to_arango] {len(existing_hashes)} existing docs"
         f" for partition {partition_key!r}"
@@ -97,7 +81,7 @@ def sync_posts_to_arango(
     to_upsert, skipped = build_upsert_docs(
         rows, existing_hashes, partition_key, crawler.thread_url, page_number
     )
-    upsert_posts(db.collection("posts"), to_upsert)
+    arango_repo.upsert_posts(to_upsert)
 
     context.log.info(
         f"[sync_posts_to_arango] upserted={len(to_upsert)} skipped_unchanged={skipped}"
@@ -117,7 +101,6 @@ def sync_posts_to_arango(
     partitions_def=voz_pages_partitions,
     group_name="reply_graph",
     deps=[_sync_dep],
-    automation_condition=AutomationCondition.eager(),
 )
 def extract_explicit_edges(
     context: AssetExecutionContext,
@@ -134,15 +117,15 @@ def extract_explicit_edges(
 
     context.log.info(f"[extract_explicit_edges] partition={partition_key!r} page_url={page_url}")
 
-    rows = fetch_posts_with_blockquotes(postgres.url, page_url)
+    rows = postgres.get_repository().fetch_posts_with_blockquotes(page_url)
     context.log.info(f"[extract_explicit_edges] {len(rows)} posts with potential quote blocks")
 
-    db = arango.get_db()
-    dropped = drop_partition_edges(db, partition_key)
+    arango_repo = arango.get_repository()
+    dropped = arango_repo.drop_partition_edges(partition_key)
     context.log.info(f"[extract_explicit_edges] dropped {dropped} existing edges")
 
     edges = build_edges(rows, partition_key)
-    insert_edges(db.collection("quotes"), edges)
+    arango_repo.insert_edges(edges)
     context.log.info(f"[extract_explicit_edges] inserted {len(edges)} edges from {len(rows)} posts")
 
     return MaterializeResult(
@@ -161,7 +144,6 @@ def extract_explicit_edges(
     group_name="reply_graph",
     compute_kind="OpenAI",
     deps=[_sync_dep],
-    automation_condition=AutomationCondition.eager(),
 )
 def compute_embeddings(
     context: AssetExecutionContext,
@@ -176,8 +158,8 @@ def compute_embeddings(
     partition_key = context.partition_key
     context.log.info(f"[compute_embeddings] partition={partition_key!r}")
 
-    db = arango.get_db()
-    to_embed = fetch_posts_needing_embedding(db, partition_key)
+    arango_repo = arango.get_repository()
+    to_embed = arango_repo.fetch_posts_needing_embedding(partition_key)
     context.log.info(f"[compute_embeddings] {len(to_embed)} posts need embedding")
 
     if not to_embed:
@@ -190,7 +172,7 @@ def compute_embeddings(
         )
 
     with openai.get_client(context) as client:
-        total = embed_and_update(db.collection("posts"), client, to_embed)
+        total = embed_and_update(arango_repo, client, to_embed)
 
     context.log.info(f"[compute_embeddings] embedded {total} posts in partition {partition_key!r}")
     return MaterializeResult(

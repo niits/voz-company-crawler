@@ -12,7 +12,6 @@ from voz_crawler.defs.assets.reply_graph import (
     sync_posts_to_arango,
 )
 from voz_crawler.defs.jobs.ingestion import crawl_page_job, discover_pages_job
-from voz_crawler.defs.jobs.reply_graph import reply_graph_job
 from voz_crawler.defs.resources.arango_resource import ArangoDBResource
 from voz_crawler.defs.resources.crawler_resource import CrawlerResource
 from voz_crawler.defs.resources.postgres_resource import PostgresResource
@@ -25,7 +24,7 @@ defs = Definitions(
         extract_explicit_edges,
         compute_embeddings,
     ],
-    jobs=[crawl_page_job, discover_pages_job, reply_graph_job],
+    jobs=[crawl_page_job, discover_pages_job],
     sensors=[voz_discover_sensor, voz_crawl_sensor],
     resources={
         "dagster_dlt": DagsterDltResource(),
@@ -35,6 +34,8 @@ defs = Definitions(
             host=EnvVar("POSTGRES_HOST"),
             port=EnvVar.int("POSTGRES_PORT"),
             db=EnvVar("POSTGRES_DB"),
+            raw_schema=EnvVar("PG_RAW_SCHEMA"),
+            posts_table=EnvVar("PG_POSTS_TABLE"),
         ),
         "crawler": CrawlerResource(
             thread_url=EnvVar("VOZ_THREAD_URL"),

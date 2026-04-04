@@ -62,7 +62,7 @@ def voz_page_posts_assets(
     runtime_pipeline = dlt.pipeline(
         pipeline_name="voz_crawler",
         destination=dlt.destinations.postgres(credentials=postgres.url),
-        dataset_name="raw",
+        dataset_name=postgres.raw_schema,
     )
     yield from dagster_dlt.run(
         context=context,

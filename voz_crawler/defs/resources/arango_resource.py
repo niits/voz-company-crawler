@@ -1,30 +1,33 @@
 from arango import ArangoClient
-from dagster import ConfigurableResource
+from dagster import ConfigurableResource, InitResourceContext
+from pydantic import PrivateAttr
+
+from voz_crawler.core.repository.graph_repository import GraphRepository
 
 
 class ArangoDBResource(ConfigurableResource):
     """Connection parameters for ArangoDB.
 
     Fields are resolved from environment variables at runtime via EnvVar.
-    `get_db()` creates the target database if it doesn't exist, then returns
-    an authenticated Database handle ready for collection/graph operations.
+    The authenticated database handle is created once per process in
+    setup_for_execution, including creating the target database if absent.
     """
 
     host: str
-    port: int = 8529
+    port: int
     db: str
-    username: str = "root"
+    username: str
     password: str
 
-    def get_db(self):
-        """Return an authenticated ArangoDB Database handle.
+    _db: object = PrivateAttr()
 
-        Creates the target database on first call if it doesn't exist yet.
-        Each call opens a new HTTP session — callers should not cache the result
-        across asset boundaries.
-        """
+    def setup_for_execution(self, context: InitResourceContext) -> None:
         client = ArangoClient(hosts=f"http://{self.host}:{self.port}")
         sys_db = client.db("_system", username=self.username, password=self.password)
         if not sys_db.has_database(self.db):
             sys_db.create_database(self.db)
-        return client.db(self.db, username=self.username, password=self.password)
+        self._db = client.db(self.db, username=self.username, password=self.password)
+        GraphRepository(db=self._db).ensure_schema()
+
+    def get_repository(self) -> GraphRepository:
+        return GraphRepository(db=self._db)
