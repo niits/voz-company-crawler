@@ -4,7 +4,6 @@ Uses a MagicMock arango db (arango_db fixture from conftest.py).
 Each test section configures the mock's return values to exercise one method.
 """
 
-from unittest.mock import call
 
 from voz_crawler.core.entities.arango import ArangoEdge, ArangoPost, EmbedItem, EmbedPatch
 from voz_crawler.core.repository.graph_repository import GraphRepository
@@ -76,10 +75,12 @@ def test_ensure_schema_skips_create_when_already_exists(arango_db):
 
 
 def test_get_existing_hashes_returns_key_hash_dict(arango_db):
-    arango_db.aql.execute.return_value = iter([
-        {"k": "1001", "h": "hash_a"},
-        {"k": "1002", "h": "hash_b"},
-    ])
+    arango_db.aql.execute.return_value = iter(
+        [
+            {"k": "1001", "h": "hash_a"},
+            {"k": "1002", "h": "hash_b"},
+        ]
+    )
     result = _repo(arango_db).get_existing_hashes(PARTITION_KEY)
     assert result == {"1001": "hash_a", "1002": "hash_b"}
 
@@ -122,10 +123,12 @@ def test_upsert_posts_serializes_with_aliases(arango_db):
 
 
 def test_fetch_posts_needing_embedding_returns_embed_items(arango_db):
-    arango_db.aql.execute.return_value = iter([
-        {"key": "1001", "text": "hello world"},
-        {"key": "1002", "text": "another post"},
-    ])
+    arango_db.aql.execute.return_value = iter(
+        [
+            {"key": "1001", "text": "hello world"},
+            {"key": "1002", "text": "another post"},
+        ]
+    )
     items = _repo(arango_db).fetch_posts_needing_embedding(PARTITION_KEY)
     assert len(items) == 2
     assert all(isinstance(i, EmbedItem) for i in items)
@@ -141,7 +144,9 @@ def test_fetch_posts_needing_embedding_empty_returns_empty(arango_db):
 
 
 def test_update_post_embeddings_calls_update_many(arango_db):
-    patches = [EmbedPatch(key="1001", embedding=[0.1, 0.2], embedding_model="text-embedding-3-small")]
+    patches = [
+        EmbedPatch(key="1001", embedding=[0.1, 0.2], embedding_model="text-embedding-3-small")
+    ]
     _repo(arango_db).update_post_embeddings(patches)
     arango_db.collection("posts").update_many.assert_called_once()
 

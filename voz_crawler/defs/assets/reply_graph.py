@@ -1,6 +1,7 @@
 from dagster import (
     AssetDep,
     AssetExecutionContext,
+    AutomationCondition,
     IdentityPartitionMapping,
     MaterializeResult,
     MetadataValue,
@@ -34,6 +35,7 @@ def _page_url(partition_key: str, thread_url: str) -> str:
     partitions_def=voz_pages_partitions,
     group_name="reply_graph",
     deps=[_upstream_dep],
+    automation_condition=AutomationCondition.eager(),
 )
 def sync_posts_to_arango(
     context: AssetExecutionContext,
@@ -101,6 +103,7 @@ def sync_posts_to_arango(
     partitions_def=voz_pages_partitions,
     group_name="reply_graph",
     deps=[_sync_dep],
+    automation_condition=AutomationCondition.eager(),
 )
 def extract_explicit_edges(
     context: AssetExecutionContext,
@@ -144,6 +147,7 @@ def extract_explicit_edges(
     group_name="reply_graph",
     compute_kind="OpenAI",
     deps=[_sync_dep],
+    automation_condition=AutomationCondition.eager(),
 )
 def compute_embeddings(
     context: AssetExecutionContext,

@@ -74,9 +74,7 @@ class GraphRepository:
     def update_post_embeddings(self, patches: list[EmbedPatch]) -> None:
         """Patch embedding fields on existing post documents."""
         if patches:
-            self._db.collection("posts").update_many(
-                [p.model_dump(by_alias=True) for p in patches]
-            )
+            self._db.collection("posts").update_many([p.model_dump(by_alias=True) for p in patches])
 
     # ── Edges ────────────────────────────────────────────────────────────────
 

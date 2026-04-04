@@ -4,7 +4,6 @@ Seed data mirrors the rows used in the legacy integration_test.py script,
 kept here so all test modules can reference the same baseline dataset.
 """
 
-import pytest
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 

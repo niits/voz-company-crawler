@@ -20,9 +20,7 @@ def test_html_without_blockquote_returns_no_edges():
 
 def test_single_valid_blockquote():
     html = (
-        '<blockquote class="bbCodeBlock--quote" data-source="post: 2000">'
-        "quoted text"
-        "</blockquote>"
+        '<blockquote class="bbCodeBlock--quote" data-source="post: 2000">quoted text</blockquote>'
     )
     edges = extract_quote_edges(html, SOURCE_POST_ID, PARTITION_KEY)
 

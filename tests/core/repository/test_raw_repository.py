@@ -4,8 +4,8 @@ Uses a SQLite in-memory engine (pg_engine fixture from conftest.py).
 schema=None avoids SQLite's lack of schema namespacing.
 """
 
-from voz_crawler.core.repository.raw_repository import RawRepository
 from tests.conftest import TEST_PAGE_URL
+from voz_crawler.core.repository.raw_repository import RawRepository
 
 
 def _repo(pg_engine):

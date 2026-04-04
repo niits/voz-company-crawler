@@ -4,11 +4,12 @@ pg_engine  — SQLite in-memory, seeded with SEED_ROWS (no schema prefix, SQLite
 arango_db  — MagicMock wired to return sensible defaults; each test configures it further.
 """
 
-import pytest
-from sqlalchemy import create_engine, text
 from unittest.mock import MagicMock
 
-from tests.conftest import SEED_ROWS, TEST_PAGE_URL
+import pytest
+from sqlalchemy import create_engine, text
+
+from tests.conftest import SEED_ROWS
 
 _CREATE_TABLE = """
     CREATE TABLE IF NOT EXISTS voz__posts (

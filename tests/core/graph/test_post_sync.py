@@ -5,8 +5,6 @@ Pure functions — no external services, no mocking required.
 
 import hashlib
 
-import pytest
-
 from voz_crawler.core.entities.raw_post import RawPost
 from voz_crawler.core.graph.post_sync import build_upsert_docs, content_hash
 
