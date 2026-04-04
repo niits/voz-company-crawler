@@ -25,7 +25,9 @@ _CF_BLOCK_MARKERS = ("Just a moment", "cf-browser-verification")
 _CF_BLOCK_STATUSES = (403, 429, 503)
 
 
-def fetch_via_flaresolverr(url: str, flaresolverr_url: str, timeout: int = 60) -> tuple[int, str]:
+def fetch_via_flaresolverr(
+    url: str, flaresolverr_url: str, timeout: int = 60
+) -> tuple[int, str]:
     """Fetch a URL through FlareSolverr. Returns (status_code, html)."""
     payload = {
         "cmd": "request.get",
@@ -70,24 +72,23 @@ def voz_page_posts(
         page_url, flaresolverr_url, timeout=http_timeout_seconds
     )
     if is_cf_block(status_code, html):
-        raise RuntimeError(f"Cloudflare blocked {page_url} (HTTP {status_code}). Try again later.")
+        raise RuntimeError(
+            f"Cloudflare blocked {page_url} (HTTP {status_code}). Try again later."
+        )
 
     for post in extract_posts(html):
-        if not post["post_id_on_site"]:
+        if not post.post_id_on_site:
             continue
         try:
-            post_id_int = int(post["post_id_on_site"])
+            post_id_int = int(post.post_id_on_site)
         except (ValueError, TypeError):
             continue
-        yield {
-            "post_id_on_site": post_id_int,
-            "page_url": page_url,
-            "author_username": post["author_username"],
-            "author_id_on_site": post["author_id_on_site"],
-            "posted_at_raw": post["posted_at_raw"],
-            "raw_content_html": post["raw_content_html"],
-            "raw_content_text": post["raw_content_text"],
-        }
+
+        data = post.model_dump(mode="json")
+        data["post_id_on_site"] = post_id_int
+        data["page_url"] = page_url
+
+        yield data
 
 
 @dlt.source(name="voz")

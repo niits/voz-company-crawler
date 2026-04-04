@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "mypy"]
+dev = []
 
 [tool.dagster]
 module_name = "voz_crawler.definitions"
@@ -34,6 +34,9 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=9.0.2",
     "ruff>=0.15.6",
+    "python-dotenv>=1.0",
+    "ipykernel>=6.0",
+    "mypy",
 ]
 
 [tool.ruff]
