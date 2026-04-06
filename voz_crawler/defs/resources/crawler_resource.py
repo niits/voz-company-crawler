@@ -11,8 +11,8 @@ class CrawlerResource(ConfigurableResource):
 
     thread_url: str
     flaresolverr_url: str
-    http_delay_seconds: str = "2"
-    http_timeout_seconds: int = 60
+    http_delay_seconds: str
+    http_timeout_seconds: int
 
     @property
     def delay(self) -> float:

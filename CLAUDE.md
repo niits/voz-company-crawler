@@ -8,7 +8,9 @@ Data pipeline crawling IT company reviews from the Voz.vn forum.
 |---|---|
 | Orchestration | Dagster + dagster-dlt |
 | Ingestion | dlt (`dlt[postgres]`) |
-| Storage | PostgreSQL |
+| Storage (raw) | PostgreSQL |
+| Storage (graph) | ArangoDB |
+| Embeddings | OpenAI `text-embedding-3-small` |
 | HTTP / CF bypass | FlareSolverr (Chrome headless sidecar) |
 | Transformation | dbt (scaffold ready) |
 | Dependency mgmt | uv |
@@ -18,17 +20,33 @@ Data pipeline crawling IT company reviews from the Voz.vn forum.
 ```
 voz_crawler/
   core/
+    entities/
+      raw_post.py         RawPost SQLModel (mirrors raw.voz__posts columns)
+      arango.py           ArangoPost, ArangoEdge, EmbedItem, EmbedPatch entities
+    graph/
+      post_sync.py        build_upsert_docs — diff rows vs existing hashes
+      edge_sync.py        build_edges — parse blockquotes into ArangoEdge list
+      quote_parser.py     extract_quote_edges — BeautifulSoup XenForo quote parser
+      embedding_sync.py   embed_and_update — batched OpenAI embedding + ArangoDB patch
     ingestion/
       html_source/
         html_parser.py    BeautifulSoup post extractor (extract_posts)
         pagination.py     XenForo URL builder + page count discovery
+    repository/
+      raw_repository.py   RawRepository — PostgreSQL read access for post rows
+      graph_repository.py GraphRepository — ArangoDB posts/quotes/reply_graph operations
   defs/
-    assets/ingestion.py   @dlt_assets: voz_page_posts_assets (partitioned)
-    jobs/ingestion.py     crawl_page_job + discover_pages_job
+    assets/
+      ingestion.py        @dlt_assets: voz_page_posts_assets (partitioned)
+      reply_graph.py      sync_posts_to_arango, extract_explicit_edges, compute_embeddings
+    jobs/
+      ingestion.py        crawl_page_job + discover_pages_job
+      reply_graph.py      reply_graph_job (all reply_graph assets, partitioned)
     ops/ingestion.py      discover_pages_op (registers dynamic partitions)
     resources/
       crawler_resource.py CrawlerResource (thread_url, flaresolverr_url, timeout)
       postgres_resource.py PostgresResource (assembles SQLAlchemy URL)
+      arango_resource.py  ArangoDBResource (connects to ArangoDB, ensures schema)
     sensors/ingestion.py  voz_discover_sensor + voz_crawl_sensor
   dlt/
     sources/voz_thread.py dlt source: voz_page_source + FlareSolverr fetch helpers
@@ -42,8 +60,8 @@ docs/
 ```bash
 cp .env.example .env      # fill in real values
 uv sync
-docker compose up postgres pgadmin -d   # Postgres :5432, pgAdmin :5050
-uv run dagster dev                      # Dagit UI :3000
+docker compose up postgres pgadmin arangodb -d   # Postgres :5432, pgAdmin :5050, ArangoDB :8529
+uv run dagster dev                               # Dagit UI :3000
 ```
 
 `dagster dev` loads `.env` automatically — no dotenv needed.
@@ -92,7 +110,36 @@ On Cloudflare block (403/429/503), the asset raises `RuntimeError`. Safe — nex
 | `FLARESOLVERR_URL` | — | FlareSolverr sidecar URL (e.g. `http://flaresolverr:8191`) |
 | `HTTP_DELAY_SECONDS` | `2` | Retained for env compat (unused in asset) |
 | `HTTP_TIMEOUT_SECONDS` | `60` | Per-request timeout |
-| `OPENAI_API_KEY` | — | Future LLM extraction |
+| `PG_RAW_SCHEMA` | `raw` | PostgreSQL schema containing dlt-managed tables |
+| `PG_POSTS_TABLE` | `posts` | Table name inside `PG_RAW_SCHEMA` |
+| `ARANGO_HOST` | — | ArangoDB hostname (e.g. `localhost` or `arangodb`) |
+| `ARANGO_PORT` | `8529` | ArangoDB HTTP port |
+| `ARANGO_DB` | — | Target database name (auto-created if absent) |
+| `ARANGO_USER` | — | ArangoDB username |
+| `ARANGO_PASSWORD` | — | ArangoDB password |
+| `OPENAI_API_KEY` | — | OpenAI API key for embedding computation |
+
+## Reply Graph Pipeline
+
+Three assets in the `reply_graph` group run after each successful crawl partition:
+
+**`sync_posts_to_arango`** — reads `raw.voz__posts` for the page URL, diffs against existing ArangoDB documents by `content_hash`, and upserts only changed/new posts. Changed posts have `embedding=None` reset to trigger re-embedding.
+
+**`extract_explicit_edges`** — re-parses XenForo `<blockquote>` HTML for the same partition, drops all existing quote edges for that partition, and re-inserts fresh edges into the `quotes` edge collection.
+
+**`compute_embeddings`** — fetches posts with `embedding == null` for the partition, calls OpenAI `text-embedding-3-small` in batches of 100, and patches embeddings back to ArangoDB.
+
+All three use `AutomationCondition.eager()` and `IdentityPartitionMapping` to mirror the `voz_page_posts_assets` partition key exactly.
+
+### ArangoDB Schema
+
+| Collection | Type | Purpose |
+|---|---|---|
+| `posts` | vertex | One document per forum post (`_key = post_id_on_site`) |
+| `quotes` | edge | XenForo explicit quote relationships |
+| `reply_graph` | named graph | ArangoDB graph wrapping posts → quotes → posts |
+
+Indexes: `partition_key` persistent index on both collections for partition-scoped queries.
 
 ## Adding dbt Models
 

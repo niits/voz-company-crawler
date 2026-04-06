@@ -10,6 +10,7 @@ crawl_page_job = define_asset_job(
     selection=AssetSelection.groups("voz"),
     partitions_def=voz_pages_partitions,
     description="Crawl one Voz.vn thread page partition and load posts to PostgreSQL.",
+    tags={"dagster/concurrency_key": "voz_crawl"},
 )
 
 

@@ -1,7 +1,9 @@
 from bs4 import BeautifulSoup
 
+from voz_crawler.core.entities.parsed_post import ParsedPost
 
-def extract_posts(html: str) -> list[dict]:
+
+def extract_posts(html: str) -> list[ParsedPost]:
     """Parse XenForo thread page HTML and extract raw post records.
 
     XenForo post structure:
@@ -28,15 +30,15 @@ def extract_posts(html: str) -> list[dict]:
         raw_content_html, raw_content_text = _extract_body(article)
 
         posts.append(
-            {
-                "post_id_on_site": post_id,
-                "post_position": position,
-                "author_username": author_username,
-                "author_id_on_site": author_id,
-                "posted_at_raw": posted_at_raw,
-                "raw_content_html": raw_content_html,
-                "raw_content_text": raw_content_text,
-            }
+            ParsedPost(
+                post_id_on_site=post_id,
+                post_position=position,
+                author_username=author_username,
+                author_id_on_site=author_id,
+                posted_at_raw=posted_at_raw,
+                raw_content_html=raw_content_html,
+                raw_content_text=raw_content_text,
+            )
         )
 
     return posts

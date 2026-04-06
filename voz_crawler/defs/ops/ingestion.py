@@ -1,6 +1,10 @@
 from dagster import OpExecutionContext, op
 
-from voz_crawler.core.ingestion.html_source.pagination import build_page_url, discover_total_pages
+from voz_crawler.core.ingestion.html_source.pagination import (
+    build_page_url,
+    discover_total_pages,
+    extract_thread_id,
+)
 from voz_crawler.defs.resources.crawler_resource import CrawlerResource
 from voz_crawler.dlt.sources.voz_thread import fetch_via_flaresolverr, is_cf_block
 
@@ -22,8 +26,13 @@ def discover_pages_op(context: OpExecutionContext, crawler: CrawlerResource) -> 
     total_pages = discover_total_pages(html)
     context.log.info(f"Discovered {total_pages} total pages.")
 
+    thread_id = extract_thread_id(crawler.thread_url)
     existing_keys: set[str] = set(context.instance.get_dynamic_partitions("voz_pages"))
-    new_keys = [str(p) for p in range(1, total_pages + 1) if str(p) not in existing_keys]
+    new_keys = [
+        f"{thread_id}:{p}"
+        for p in range(1, total_pages + 1)
+        if f"{thread_id}:{p}" not in existing_keys
+    ]
     if new_keys:
         context.instance.add_dynamic_partitions("voz_pages", new_keys)
         preview = new_keys[:5] + (["..."] if len(new_keys) > 5 else [])

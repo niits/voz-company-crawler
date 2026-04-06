@@ -125,6 +125,46 @@ Architectural and implementation decisions for the Voz Company Crawler.
 
 ---
 
+### 11. ArangoDB as graph store for the reply graph
+
+**Decision**: Use ArangoDB's native graph model (`reply_graph`: posts ↔ quotes edge collection) instead of a self-referencing PostgreSQL table.
+
+**Rationale**:
+- XenForo quote relationships are naturally a directed graph — ArangoDB graph traversals (`FOR v, e IN 1..N OUTBOUND`) express multi-hop reply chains without recursive CTEs.
+- ArangoDB's `import_bulk` with `on_duplicate="replace"` provides upsert semantics identical to dlt's `write_disposition="merge"`, keeping the sync logic simple.
+- Future vector similarity search can use ArangoDB's built-in vector index on the `embedding` field without migrating to a separate vector store.
+
+**Schema**: `posts` (vertex collection, `_key = post_id_on_site`), `quotes` (edge collection, `_from / _to` are vertex references). Both collections have a `partition_key` persistent index for partition-scoped queries and cleanup.
+
+**Trade-off**: Adds ArangoDB as an infrastructure dependency. ArangoDB auto-creates the target database and collections on first `ArangoDBResource.setup_for_execution()` call — no manual DB init needed.
+
+---
+
+### 12. Content-hash diffing to avoid redundant upserts and embedding resets
+
+**Decision**: Before upserting a post to ArangoDB, compare `SHA-256(raw_content_text)` against the stored `content_hash`. Skip unchanged posts entirely; reset `embedding=None` for changed or new posts.
+
+**Rationale**:
+- Forum posts can be edited. Without diffing, every sync would overwrite valid embeddings with `null` and trigger unnecessary OpenAI API calls.
+- SHA-256 is deterministic and fast; a single AQL query (`get_existing_hashes`) fetches all `{_key: content_hash}` pairs for the partition in one round-trip.
+- `embedding=None` on upsert acts as a flag: `compute_embeddings` only processes posts where `embedding == null`, so the two assets are naturally decoupled.
+
+**Trade-off**: Requires a full scan of the partition's ArangoDB docs on every sync run. For typical page sizes (~20–50 posts) this is negligible.
+
+---
+
+### 13. AutomationCondition.eager() for reply_graph assets
+
+**Decision**: All three reply_graph assets (`sync_posts_to_arango`, `extract_explicit_edges`, `compute_embeddings`) use `AutomationCondition.eager()` with `IdentityPartitionMapping`.
+
+**Rationale**:
+- `eager()` triggers materialisation as soon as all upstream partitions are materialised — no custom sensor needed for the reply graph pipeline.
+- `IdentityPartitionMapping` maps each `voz_page_posts_assets` partition key directly to the same-keyed reply graph partition, preserving per-page isolation.
+
+**Trade-off**: `eager()` fires on every upstream materialisation, including re-runs of historical pages. This is intentional — re-crawling a page should always re-sync its graph data.
+
+---
+
 ### 10. PostgreSQL connection management: max_connections=300 + engine disposal
 
 **Decision**: Set PostgreSQL `max_connections=300` in docker-compose and explicitly dispose the dlt pipeline's SQLAlchemy engine after each asset run.

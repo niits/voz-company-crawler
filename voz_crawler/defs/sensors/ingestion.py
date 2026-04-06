@@ -40,7 +40,10 @@ def voz_discover_sensor(context: SensorEvaluationContext) -> SensorResult:
     ),
 )
 def voz_crawl_sensor(context: RunStatusSensorContext) -> SensorResult:
-    all_keys: list[str] = sorted(context.instance.get_dynamic_partitions("voz_pages"), key=int)
+    all_keys: list[str] = sorted(
+        context.instance.get_dynamic_partitions("voz_pages"),
+        key=lambda k: int(k.rsplit(":", 1)[1]),
+    )
     if not all_keys:
         return SensorResult(skip_reason="No partitions registered yet.")
 
@@ -57,6 +60,7 @@ def voz_crawl_sensor(context: RunStatusSensorContext) -> SensorResult:
                 RunRequest(
                     run_key=f"page-{page_key}-{today}",
                     partition_key=page_key,
+                    tags={"dagster/concurrency_key": "voz_crawl"},
                 )
             )
         elif page_key not in materialized:
@@ -65,6 +69,7 @@ def voz_crawl_sensor(context: RunStatusSensorContext) -> SensorResult:
                 RunRequest(
                     run_key=f"page-{page_key}",
                     partition_key=page_key,
+                    tags={"dagster/concurrency_key": "voz_crawl"},
                 )
             )
 
