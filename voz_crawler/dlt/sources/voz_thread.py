@@ -25,9 +25,7 @@ _CF_BLOCK_MARKERS = ("Just a moment", "cf-browser-verification")
 _CF_BLOCK_STATUSES = (403, 429, 503)
 
 
-def fetch_via_flaresolverr(
-    url: str, flaresolverr_url: str, timeout: int = 60
-) -> tuple[int, str]:
+def fetch_via_flaresolverr(url: str, flaresolverr_url: str, timeout: int = 60) -> tuple[int, str]:
     """Fetch a URL through FlareSolverr. Returns (status_code, html)."""
     payload = {
         "cmd": "request.get",
@@ -72,9 +70,7 @@ def voz_page_posts(
         page_url, flaresolverr_url, timeout=http_timeout_seconds
     )
     if is_cf_block(status_code, html):
-        raise RuntimeError(
-            f"Cloudflare blocked {page_url} (HTTP {status_code}). Try again later."
-        )
+        raise RuntimeError(f"Cloudflare blocked {page_url} (HTTP {status_code}). Try again later.")
 
     for post in extract_posts(html):
         if not post.post_id_on_site:

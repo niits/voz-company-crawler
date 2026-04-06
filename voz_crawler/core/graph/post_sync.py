@@ -1,6 +1,6 @@
 import hashlib
 
-from voz_crawler.core.entities.arango import ArangoPost
+from voz_crawler.core.entities.graph import GraphPost
 from voz_crawler.core.entities.raw_post import RawPost
 
 
@@ -14,24 +14,22 @@ def build_upsert_docs(
     partition_key: str,
     thread_url: str,
     page_number: int,
-) -> tuple[list[ArangoPost], int]:
+) -> tuple[list[GraphPost], int]:
     """Diff rows against existing hashes.
 
     Returns (posts_to_upsert, skipped_count).
     Changed or new posts are included with embedding=None to trigger re-embedding.
     Unchanged posts (hash match) are skipped.
     """
-    to_upsert: list[ArangoPost] = []
+    to_upsert: list[GraphPost] = []
     skipped = 0
     for r in rows:
-        key = str(r.post_id_on_site)
         new_hash = content_hash(r.raw_content_text)
-        if existing_hashes.get(key) == new_hash:
+        if existing_hashes.get(str(r.post_id_on_site)) == new_hash:
             skipped += 1
             continue
         to_upsert.append(
-            ArangoPost(
-                key=key,
+            GraphPost(
                 post_id=r.post_id_on_site,
                 author_username=r.author_username,
                 author_id=r.author_id_on_site,

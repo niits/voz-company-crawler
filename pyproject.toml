@@ -15,6 +15,7 @@ dependencies = [
     "dagster-postgres>=0.28.19",
     "dagster-docker>=0.28.19",
     "python-arango>=8.0",
+    "neo4j>=5.0",
     "dagster-openai",
     "sqlalchemy>=2.0",
     "sqlmodel>=0.0.38",
@@ -37,6 +38,11 @@ dev = [
     "python-dotenv>=1.0",
     "ipykernel>=6.0",
     "mypy",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires running Docker services (arangodb + neo4j)",
 ]
 
 [tool.ruff]

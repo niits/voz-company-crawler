@@ -1,7 +1,8 @@
-"""Fixtures for repository tests.
+"""Fixtures for repository unit tests.
 
-pg_engine  — SQLite in-memory, seeded with SEED_ROWS (no schema prefix, SQLite compat).
-arango_db  — MagicMock wired to return sensible defaults; each test configures it further.
+pg_engine   — SQLite in-memory, seeded with SEED_ROWS (no schema prefix, SQLite compat).
+arango_db   — MagicMock wired to return sensible defaults; each test configures it further.
+neo4j_mock  — (driver, session, result) triple wired as a context manager for neo4j driver.
 """
 
 from unittest.mock import MagicMock
@@ -35,11 +36,7 @@ _INSERT_ROW = """
 
 @pytest.fixture
 def pg_engine():
-    """SQLite in-memory engine seeded with SEED_ROWS.
-
-    RawRepository is constructed with schema=None so SQLAlchemy emits
-    plain table names without a schema prefix (SQLite has no schema support).
-    """
+    """SQLite in-memory engine seeded with SEED_ROWS."""
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     with engine.begin() as conn:
         conn.execute(text(_CREATE_TABLE))
@@ -51,22 +48,49 @@ def pg_engine():
 
 @pytest.fixture
 def arango_db():
-    """MagicMock that stands in for a python-arango Database instance.
+    """MagicMock standing in for a python-arango Database instance.
 
     Default wiring:
-    - has_collection / has_graph → False (so ensure_schema always creates)
+    - has_collection / has_graph → False (ensure_schema always creates)
     - aql.execute → returns [] (override per-test as needed)
     - collection() → a fresh MagicMock with import_bulk / update_many / add_persistent_index
     """
     db = MagicMock()
     db.has_collection.return_value = False
     db.has_graph.return_value = False
-
-    # aql cursor defaults to empty — override in tests that need data
     db.aql.execute.return_value = iter([])
-
-    # collection() returns a consistent mock regardless of name
     col = MagicMock()
     db.collection.return_value = col
-
     return db
+
+
+@pytest.fixture
+def neo4j_mock():
+    """(driver, session, result) triple mocking the neo4j Python driver.
+
+    Wiring:
+    - driver.session() is a context manager that yields ``session``
+    - session.run() returns ``result``
+    - result.__iter__ returns an empty iterator (override per-test)
+    - result.single() returns None (override per-test)
+
+    Usage in tests::
+
+        def test_something(neo4j_mock):
+            driver, session, result = neo4j_mock
+            result.__iter__ = MagicMock(return_value=iter([{"post_id": 1, "content_hash": "x"}]))
+            repo = Neo4jGraphRepository(driver=driver, database="test")
+            ...
+    """
+    driver = MagicMock()
+    session = MagicMock()
+    result = MagicMock()
+
+    result.single.return_value = None
+    result.__iter__ = MagicMock(return_value=iter([]))
+
+    session.run.return_value = result
+    driver.session.return_value.__enter__ = MagicMock(return_value=session)
+    driver.session.return_value.__exit__ = MagicMock(return_value=False)
+
+    return driver, session, result

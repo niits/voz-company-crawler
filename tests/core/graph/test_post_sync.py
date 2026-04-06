@@ -61,8 +61,7 @@ def test_doc_fields_mapped_from_raw_post():
     docs, _ = build_upsert_docs([row], {}, PARTITION_KEY, THREAD_URL, PAGE_NUMBER)
 
     d = docs[0]
-    assert d.key == "1001"
-    assert d.post_id == 1001
+    assert d.post_id == 1001  # int identity (no separate .key)
     assert d.content_hash == content_hash("hello world")
     assert d.thread_url == THREAD_URL
     assert d.page_number == PAGE_NUMBER
@@ -94,7 +93,7 @@ def test_mixed_changed_and_unchanged():
 
     assert len(docs) == 1
     assert skipped == 1
-    assert docs[0].key == "1002"
+    assert docs[0].post_id == 1002
 
 
 def test_embedding_always_none_on_upsert_doc():

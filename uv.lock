@@ -1954,6 +1954,18 @@ wheels = [
 ]
 
 [[package]]
+name = "neo4j"
+version = "6.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytz" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1b/01/d6ce65e4647f6cb2b9cca3b813978f7329b54b4e36660aaec1ddf0ccce7a/neo4j-6.1.0.tar.gz", hash = "sha256:b5dde8c0d8481e7b6ae3733569d990dd3e5befdc5d452f531ad1884ed3500b84", size = 239629, upload-time = "2026-01-12T11:27:34.777Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/70/5c/ee71e2dd955045425ef44283f40ba1da67673cf06404916ca2950ac0cd39/neo4j-6.1.0-py3-none-any.whl", hash = "sha256:3bd93941f3a3559af197031157220af9fd71f4f93a311db687bd69ffa417b67d", size = 325326, upload-time = "2026-01-12T11:27:33.196Z" },
+]
+
+[[package]]
 name = "nest-asyncio"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3701,6 +3713,7 @@ dependencies = [
     { name = "dagster-webserver" },
     { name = "dlt", extra = ["postgres"] },
     { name = "lxml" },
+    { name = "neo4j" },
     { name = "openai" },
     { name = "python-arango" },
     { name = "requests" },
@@ -3729,6 +3742,7 @@ requires-dist = [
     { name = "dagster-webserver" },
     { name = "dlt", extras = ["postgres"], specifier = ">=1.0" },
     { name = "lxml" },
+    { name = "neo4j", specifier = ">=5.0" },
     { name = "openai", specifier = ">=1.0" },
     { name = "python-arango", specifier = ">=8.0" },
     { name = "requests", specifier = ">=2.32" },

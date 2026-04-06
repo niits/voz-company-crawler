@@ -26,9 +26,9 @@ def test_single_valid_blockquote():
 
     assert len(edges) == 1
     e = edges[0]
-    assert e.from_vertex == f"posts/{SOURCE_POST_ID}"
-    assert e.to_vertex == "posts/2000"
-    assert e.key == f"{SOURCE_POST_ID}_2000_1"
+    assert e.from_post_id == SOURCE_POST_ID
+    assert e.to_post_id == 2000
+    assert e.edge_key == f"{SOURCE_POST_ID}_2000_1"
     assert e.quote_ordinal == 1
     assert e.confidence == 1.0
     assert e.method == "html_metadata"
@@ -43,9 +43,9 @@ def test_multiple_blockquotes_ordinals_increment():
     edges = extract_quote_edges(html, SOURCE_POST_ID, PARTITION_KEY)
 
     assert len(edges) == 2
-    assert edges[0].to_vertex == "posts/100"
+    assert edges[0].to_post_id == 100
     assert edges[0].quote_ordinal == 1
-    assert edges[1].to_vertex == "posts/200"
+    assert edges[1].to_post_id == 200
     assert edges[1].quote_ordinal == 2
 
 

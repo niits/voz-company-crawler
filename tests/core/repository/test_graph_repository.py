@@ -1,24 +1,22 @@
-"""Tests for voz_crawler.core.repository.GraphRepository.
+"""Unit tests for ArangoGraphRepository.
 
 Uses a MagicMock arango db (arango_db fixture from conftest.py).
 Each test section configures the mock's return values to exercise one method.
 """
 
-
-from voz_crawler.core.entities.arango import ArangoEdge, ArangoPost, EmbedItem, EmbedPatch
-from voz_crawler.core.repository.graph_repository import GraphRepository
+from voz_crawler.core.entities.graph import EmbedPatch, GraphEdge, GraphPost
+from voz_crawler.core.repository.arango_repository import ArangoGraphRepository
 
 PARTITION_KEY = "test:fixtures"
 
 
 def _repo(arango_db):
-    return GraphRepository(db=arango_db)
+    return ArangoGraphRepository(db=arango_db)
 
 
-def _make_post(key: str = "1001") -> ArangoPost:
-    return ArangoPost(
-        key=key,
-        post_id=int(key),
+def _make_post(post_id: int = 1001) -> GraphPost:
+    return GraphPost(
+        post_id=post_id,
         author_username="user",
         author_id="1",
         posted_at="2024-01-01",
@@ -31,11 +29,11 @@ def _make_post(key: str = "1001") -> ArangoPost:
     )
 
 
-def _make_edge(from_id: int = 1002, to_id: int = 2000) -> ArangoEdge:
-    return ArangoEdge(
-        from_vertex=f"posts/{from_id}",
-        to_vertex=f"posts/{to_id}",
-        key=f"{from_id}_{to_id}_1",
+def _make_edge(from_id: int = 1002, to_id: int = 2000) -> GraphEdge:
+    return GraphEdge(
+        from_post_id=from_id,
+        to_post_id=to_id,
+        edge_key=f"{from_id}_{to_id}_1",
         quote_ordinal=1,
         confidence=1.0,
         method="html_metadata",
@@ -95,14 +93,13 @@ def test_get_existing_hashes_empty_partition_returns_empty_dict(arango_db):
 
 
 def test_upsert_posts_calls_import_bulk(arango_db):
-    docs = [_make_post("1001"), _make_post("1002")]
+    docs = [_make_post(1001), _make_post(1002)]
     _repo(arango_db).upsert_posts(docs)
     arango_db.collection("posts").import_bulk.assert_called_once()
 
 
 def test_upsert_posts_uses_replace_on_duplicate(arango_db):
-    docs = [_make_post("1001")]
-    _repo(arango_db).upsert_posts(docs)
+    _repo(arango_db).upsert_posts([_make_post()])
     _, kwargs = arango_db.collection("posts").import_bulk.call_args
     assert kwargs.get("on_duplicate") == "replace"
 
@@ -112,26 +109,30 @@ def test_upsert_posts_empty_list_does_not_call_import_bulk(arango_db):
     arango_db.collection("posts").import_bulk.assert_not_called()
 
 
-def test_upsert_posts_serializes_with_aliases(arango_db):
-    doc = _make_post("1001")
-    _repo(arango_db).upsert_posts([doc])
+def test_upsert_posts_serializes_with_arango_aliases(arango_db):
+    _repo(arango_db).upsert_posts([_make_post(1001)])
     payload = arango_db.collection("posts").import_bulk.call_args[0][0]
-    assert "_key" in payload[0]  # alias used, not 'key'
+    # Internally converted to ArangoDB format with _key alias
+    assert "_key" in payload[0]
+    assert payload[0]["_key"] == "1001"
 
 
 # ── fetch_posts_needing_embedding ─────────────────────────────────────────────
 
 
 def test_fetch_posts_needing_embedding_returns_embed_items(arango_db):
+    from voz_crawler.core.entities.graph import EmbedItem
+
     arango_db.aql.execute.return_value = iter(
         [
-            {"key": "1001", "text": "hello world"},
-            {"key": "1002", "text": "another post"},
+            {"post_id": 1001, "text": "hello world"},
+            {"post_id": 1002, "text": "another post"},
         ]
     )
     items = _repo(arango_db).fetch_posts_needing_embedding(PARTITION_KEY)
     assert len(items) == 2
     assert all(isinstance(i, EmbedItem) for i in items)
+    assert items[0].post_id == 1001  # int, not str
 
 
 def test_fetch_posts_needing_embedding_empty_returns_empty(arango_db):
@@ -145,7 +146,7 @@ def test_fetch_posts_needing_embedding_empty_returns_empty(arango_db):
 
 def test_update_post_embeddings_calls_update_many(arango_db):
     patches = [
-        EmbedPatch(key="1001", embedding=[0.1, 0.2], embedding_model="text-embedding-3-small")
+        EmbedPatch(post_id=1001, embedding=[0.1, 0.2], embedding_model="text-embedding-3-small")
     ]
     _repo(arango_db).update_post_embeddings(patches)
     arango_db.collection("posts").update_many.assert_called_once()
@@ -156,18 +157,24 @@ def test_update_post_embeddings_empty_list_does_not_call_update_many(arango_db):
     arango_db.collection("posts").update_many.assert_not_called()
 
 
+def test_update_post_embeddings_serializes_with_arango_key(arango_db):
+    patches = [EmbedPatch(post_id=1001, embedding=[0.1], embedding_model="m")]
+    _repo(arango_db).update_post_embeddings(patches)
+    payload = arango_db.collection("posts").update_many.call_args[0][0]
+    assert "_key" in payload[0]
+    assert payload[0]["_key"] == "1001"
+
+
 # ── insert_edges ──────────────────────────────────────────────────────────────
 
 
 def test_insert_edges_calls_import_bulk(arango_db):
-    edges = [_make_edge()]
-    _repo(arango_db).insert_edges(edges)
+    _repo(arango_db).insert_edges([_make_edge()])
     arango_db.collection("quotes").import_bulk.assert_called_once()
 
 
 def test_insert_edges_uses_ignore_on_duplicate(arango_db):
-    edges = [_make_edge()]
-    _repo(arango_db).insert_edges(edges)
+    _repo(arango_db).insert_edges([_make_edge()])
     _, kwargs = arango_db.collection("quotes").import_bulk.call_args
     assert kwargs.get("on_duplicate") == "ignore"
 
@@ -175,6 +182,14 @@ def test_insert_edges_uses_ignore_on_duplicate(arango_db):
 def test_insert_edges_empty_list_does_not_call_import_bulk(arango_db):
     _repo(arango_db).insert_edges([])
     arango_db.collection("quotes").import_bulk.assert_not_called()
+
+
+def test_insert_edges_serializes_from_to_vertex(arango_db):
+    _repo(arango_db).insert_edges([_make_edge(1002, 2000)])
+    payload = arango_db.collection("quotes").import_bulk.call_args[0][0]
+    assert payload[0]["_from"] == "posts/1002"
+    assert payload[0]["_to"] == "posts/2000"
+    assert payload[0]["_key"] == "1002_2000_1"
 
 
 # ── drop_partition_edges ──────────────────────────────────────────────────────

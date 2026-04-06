@@ -1,7 +1,7 @@
 """Tests for voz_crawler.core.graph.edge_sync.build_edges.
 
 Pure function — delegates HTML parsing to quote_parser (tested separately).
-Tests here verify the wiring: RawPost list → ArangoEdge list.
+Tests here verify the wiring: RawPost list → GraphEdge list.
 """
 
 from voz_crawler.core.entities.raw_post import RawPost
@@ -46,8 +46,8 @@ def test_post_with_blockquote_returns_one_edge():
     edges = build_edges([_post(1002, BLOCKQUOTE_HTML)], PARTITION_KEY)
 
     assert len(edges) == 1
-    assert edges[0].from_vertex == "posts/1002"
-    assert edges[0].to_vertex == "posts/2000"
+    assert edges[0].from_post_id == 1002
+    assert edges[0].to_post_id == 2000
     assert edges[0].partition_key == PARTITION_KEY
 
 
@@ -64,7 +64,7 @@ def test_multiple_posts_edges_are_concatenated():
     edges = build_edges(rows, PARTITION_KEY)
 
     assert len(edges) == 3  # 0 + 1 + 2
-    from_vertices = {e.from_vertex for e in edges}
-    assert "posts/1001" not in from_vertices
-    assert "posts/1002" in from_vertices
-    assert "posts/1003" in from_vertices
+    from_ids = {e.from_post_id for e in edges}
+    assert 1001 not in from_ids
+    assert 1002 in from_ids
+    assert 1003 in from_ids
