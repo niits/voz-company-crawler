@@ -148,6 +148,26 @@ Indexes: `partition_key` persistent index on both collections for partition-scop
 3. Sources pre-defined in `dbt/models/sources.yml` pointing at `raw`
 4. `cd dbt && uv run dbt run`
 
+## Brainstorm Notes
+
+Brainstorm notes live in `docs/brainstorm/`. When creating a new brainstorm file:
+
+**Naming convention:** `YYYYMMDD-HHMM--<slug>.md`
+
+- `YYYYMMDD` — today's date (e.g. `20260406`)
+- `HHMM` — current time in 24-hour format using hyphens (e.g. `1432`)
+- `<slug>` — short, lowercase, hyphen-separated description of the topic (e.g. `embedding-strategy.md`, `arango-schema-v2.md`)
+
+**Example:** `20260406-1432--embedding-strategy.md`
+
+**File structure:** Start every brainstorm file with a single `#` title on line 1, followed by content.
+
+```markdown
+# Embedding Strategy for Reply Graph
+
+Content starts here...
+```
+
 ## Design Decisions
 
 See [docs/design-decisions.md](docs/design-decisions.md).
