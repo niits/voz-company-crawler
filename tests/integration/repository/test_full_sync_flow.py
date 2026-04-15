@@ -12,7 +12,13 @@ Requires both Postgres and ArangoDB running.
 import pytest
 from sqlalchemy import create_engine, text
 
-from tests.conftest import SEED_ROWS, TEST_PAGE_URL, TEST_PARTITION_KEY, TEST_THREAD_URL, TEST_PAGE_NUMBER
+from tests.conftest import (
+    SEED_ROWS,
+    TEST_PAGE_NUMBER,
+    TEST_PAGE_URL,
+    TEST_PARTITION_KEY,
+    TEST_THREAD_URL,
+)
 from voz_crawler.core.graph.post_sync import build_upsert_docs
 from voz_crawler.core.repository.graph_repository import GraphRepository
 from voz_crawler.core.repository.raw_repository import RawRepository
@@ -112,8 +118,9 @@ def test_changed_content_triggers_re_upsert(clean_arango_db, sqlite_engine):
 @pytest.mark.integration
 def test_changed_post_resets_embedding(clean_arango_db, sqlite_engine):
     """After a content change, the re-upserted post must have embedding=None."""
-    from voz_crawler.core.entities.arango import EmbedPatch
     from sqlalchemy import text as t
+
+    from voz_crawler.core.entities.arango import EmbedPatch
 
     raw_repo = RawRepository(engine=sqlite_engine, schema=None, table="voz__posts")
     graph_repo = GraphRepository(db=clean_arango_db)

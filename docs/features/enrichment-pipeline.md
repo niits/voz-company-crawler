@@ -27,7 +27,8 @@ voz_page_posts_assets                        group: ingestion
                           └─► detect_implicit_replies            (NEW, OpenAI)
 ```
 
-All assets: `AutomationCondition.eager()`, `IdentityPartitionMapping`, `partitions_def=voz_pages_partitions`.
+All assets except `detect_implicit_replies`: `AutomationCondition.eager()`, `IdentityPartitionMapping`, `partitions_def=voz_pages_partitions`.
+`detect_implicit_replies` is triggered by `implicit_reply_sensor` (not `eager()`) — the sensor gates execution until all lower-numbered partitions have materialized `extract_company_mentions`.
 Resources used: `arango`, `openai` (existing). No new Dagster resources.
 
 ---
@@ -73,7 +74,7 @@ For each post where `enrichment_version IS NULL OR enrichment_version < ENRICHME
 4. PATCHes `content_class`, `content_class_confidence`, `has_company_mention`,
    `enrichment_version` onto the post document for fast AQL filtering.
 
-One LLM call per post. Serial loop — no batching at the HTTP level.
+One LLM call per post, serial within a partition. Partition-level concurrency controlled by Dagster concurrency key `voz_llm` (limit 1) — only one partition runs LLM/ArangoDB sync at a time.
 
 ### `extract_company_mentions` (new)
 
@@ -98,6 +99,10 @@ Recomputes `CompanyAliasDoc.resolutions` for affected aliases. Backfills `compan
 See `docs/features/company-identity.md` for the resolution algorithm.
 
 ### `detect_implicit_replies` (new)
+
+Trigger: `implicit_reply_sensor` (not `eager()`). Sensor fires when a partition materializes
+`extract_company_mentions` and checks that all lower-numbered partitions have also materialized
+`extract_company_mentions` — ensuring the cross-partition lookback window is fully populated.
 
 For each post in the partition that has an embedding:
 
@@ -175,8 +180,15 @@ Implicit reply edges (`implicit_llm`) are not recomputed unless the post itself 
 All LLM calls use **PydanticAI** agents:
 - Model: `openai:gpt-4o-mini`, `temperature=0`
 - Result types are Pydantic `BaseModel` subclasses — no manual `response_format` schema construction
-- `openai.get_client(context)` context manager for token auto-logging in Dagster asset catalog
+- Dagster's `openai.get_client(context)` client is injected into PydanticAI via `OpenAIModel("gpt-4o-mini", openai_client=client)` — token usage is auto-logged to Dagster asset catalog
+- `result.usage()` totals (request_tokens, response_tokens) reported in `MaterializeResult.metadata`
+- `result.all_messages()` stored as `ExtractionResultDoc.messages_json` for full input/output audit trail
 - ArangoDB repo injected via PydanticAI `RunContext[deps]`
+
+### Partition-level concurrency
+
+`classify_posts` and `detect_implicit_replies` both carry `op_tags={"dagster/concurrency_key": "voz_llm"}`.
+Set `voz_llm` limit to `1` in Dagster instance config to ensure only one partition runs LLM/ArangoDB sync at a time.
 
 ---
 

@@ -52,7 +52,6 @@ def test_all_new_rows_when_hashes_empty():
 
     assert len(docs) == 2
     assert skipped == 0
-    assert all(d.embedding is None for d in docs)
     assert all(d.partition_key == PARTITION_KEY for d in docs)
 
 
@@ -97,7 +96,8 @@ def test_mixed_changed_and_unchanged():
     assert docs[0].key == "1002"
 
 
-def test_embedding_always_none_on_upsert_doc():
+def test_upsert_doc_has_no_embedding_field():
+    """RawPostDoc (Layer 1) must not carry an embedding field — that belongs to Layer 2."""
     row = _make_post(1001, "any text")
     docs, _ = build_upsert_docs([row], {}, PARTITION_KEY, THREAD_URL, PAGE_NUMBER)
-    assert docs[0].embedding is None
+    assert not hasattr(docs[0], "embedding")

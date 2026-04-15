@@ -8,11 +8,10 @@ Tests verify:
 - empty input short-circuits without calling the API
 """
 
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 from voz_crawler.core.entities.arango import EmbedItem, EmbedPatch
 from voz_crawler.core.graph.embedding_sync import EMBEDDING_MODEL, embed_and_update
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

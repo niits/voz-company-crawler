@@ -61,8 +61,9 @@ def section(title: str) -> None:
 # ── stage builders ────────────────────────────────────────────────────────────
 
 def _make_raw_posts():
-    from voz_crawler.core.entities.raw_post import RawPost
     from datetime import datetime, timezone
+
+    from voz_crawler.core.entities.raw_post import RawPost
 
     return [
         RawPost(
@@ -117,7 +118,7 @@ def smoke_schema(db) -> None:
 
 
 def smoke_stage1_post_sync(db) -> None:
-    """Stage 1: simulate sync_posts_to_graph — RawPosts → ArangoPost nodes."""
+    """Stage 1: simulate sync_posts_to_graph — RawPosts → RawPostDoc nodes."""
     section("Stage 1 — Post Sync (sync_posts_to_graph)")
     from voz_crawler.core.graph.post_sync import build_upsert_docs
 
@@ -143,9 +144,8 @@ def smoke_stage1_post_sync(db) -> None:
 def smoke_stage2_edge_sync(db) -> None:
     """Stage 2: simulate extract_explicit_edges — HTML quotes → ArangoEdge documents."""
     section("Stage 2 — Edge Sync (extract_explicit_edges)")
-    from voz_crawler.core.entities.raw_post import RawPost
+
     from voz_crawler.core.graph.edge_sync import build_edges
-    from datetime import datetime, timezone
 
     rows_with_html = _make_raw_posts()
     # edge_sync needs raw_content_html — which post_sync drops; use the original rows

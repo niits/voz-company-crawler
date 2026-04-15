@@ -5,7 +5,7 @@ Each test section configures the mock's return values to exercise one method.
 """
 
 
-from voz_crawler.core.entities.arango import ArangoEdge, ArangoPost, EmbedItem, EmbedPatch
+from voz_crawler.core.entities.arango import ArangoEdge, EmbedItem, EmbedPatch, RawPostDoc
 from voz_crawler.core.repository.graph_repository import GraphRepository
 
 PARTITION_KEY = "test:fixtures"
@@ -15,8 +15,8 @@ def _repo(arango_db):
     return GraphRepository(db=arango_db)
 
 
-def _make_post(key: str = "1001") -> ArangoPost:
-    return ArangoPost(
+def _make_post(key: str = "1001") -> RawPostDoc:
+    return RawPostDoc(
         key=key,
         post_id=int(key),
         author_username="user",
@@ -27,7 +27,6 @@ def _make_post(key: str = "1001") -> ArangoPost:
         partition_key=PARTITION_KEY,
         thread_url="https://voz.vn/t/test",
         page_number=1,
-        embedding=None,
     )
 
 

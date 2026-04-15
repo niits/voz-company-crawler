@@ -117,6 +117,9 @@ class ExtractionResultDoc(SQLModel):
     # Implicit reply decisions — written by detect_implicit_replies after classify_posts
     implicit_replies: list[dict]            # list[ImplicitReply.model_dump()]
 
+    # Trace — full PydanticAI message history (system prompt + user input + assistant output)
+    messages_json: list[dict] | None        # stored for audit; allows re-projection without re-calling LLM
+
     # Provenance
     model_used: str                         # e.g. "gpt-4o-mini"
     extracted_at: str                       # ISO datetime
