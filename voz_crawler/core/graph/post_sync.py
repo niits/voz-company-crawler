@@ -1,6 +1,6 @@
 import hashlib
 
-from voz_crawler.core.entities.arango import ArangoPost
+from voz_crawler.core.entities.arango import RawPostDoc
 from voz_crawler.core.entities.raw_post import RawPost
 
 
@@ -14,14 +14,15 @@ def build_upsert_docs(
     partition_key: str,
     thread_url: str,
     page_number: int,
-) -> tuple[list[ArangoPost], int]:
+) -> tuple[list[RawPostDoc], int]:
     """Diff rows against existing hashes.
 
     Returns (posts_to_upsert, skipped_count).
-    Changed or new posts are included with embedding=None to trigger re-embedding.
+    Changed or new posts are upserted as RawPostDoc (Layer 1 only).
+    Replacement via on_duplicate="replace" resets all Layer 2 fields to null.
     Unchanged posts (hash match) are skipped.
     """
-    to_upsert: list[ArangoPost] = []
+    to_upsert: list[RawPostDoc] = []
     skipped = 0
     for r in rows:
         key = str(r.post_id_on_site)
@@ -30,7 +31,7 @@ def build_upsert_docs(
             skipped += 1
             continue
         to_upsert.append(
-            ArangoPost(
+            RawPostDoc(
                 key=key,
                 post_id=r.post_id_on_site,
                 author_username=r.author_username,
@@ -41,7 +42,6 @@ def build_upsert_docs(
                 partition_key=partition_key,
                 thread_url=thread_url,
                 page_number=page_number,
-                embedding=None,
             )
         )
     return to_upsert, skipped

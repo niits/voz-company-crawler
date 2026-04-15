@@ -14,7 +14,8 @@ def embed_and_update(
     """Embed posts in batches and patch their embedding field in ArangoDB.
 
     `client` must be an OpenAI client (e.g. from openai.get_client(context)).
-    `repo` must be an ArangoRepository instance.
+    `repo` must be a GraphRepository instance.
+    Embeds normalized_own_text (EmbedItem.text is populated from that field by the repository).
     Returns total number of posts embedded.
     """
     total = 0
