@@ -168,15 +168,20 @@ sync_posts_to_arango  [@asset]
     ├────────────────────────────────────────┐
     ▼                                        ▼
 extract_explicit_edges [@asset]    reply_graph_preprocess_assets [@graph_multi_asset]
-                                   (normalize_posts, compute_embeddings)
-                                             │
-                                             ▼
-                                   reply_graph_llm_assets [@graph_multi_asset]
-                                   (classify_posts, extract_company_mentions)
-                                             │
-                                             ▼
-                                   detect_implicit_replies [@asset]
+    │                              (normalize_posts, compute_embeddings)
+    │                                        │
+    │                                        ▼
+    │                              reply_graph_llm_assets [@graph_multi_asset]
+    │                              (classify_posts, extract_company_mentions)
+    │                                        │
+    └──────────────────┬─────────────────────┘
+                       ▼
+               detect_implicit_replies [@asset]
 ```
+
+**Why `detect_implicit_replies` depends on both `extract_company_mentions` AND `extract_explicit_edges`**:
+- `fetch_implicit_reply_candidates` uses `FOR v IN 1..1 ANY … GRAPH "reply_graph"` to compute `already_linked` — posts already connected by an explicit quote edge. If `extract_explicit_edges` has not yet run, this exclusion is incomplete and implicit detection may create duplicate edges for pairs already connected by an explicit `html_metadata` edge.
+- Both branches fan out from `sync_posts_to_arango` in parallel. Since `extract_explicit_edges` is O(seconds) and the LLM chain is O(minutes), in practice `extract_explicit_edges` always finishes first — but the dependency is required for correctness, not just convention.
 
 **Why two parallel branches after sync**:
 - `extract_explicit_edges` parses blockquote HTML and writes edge documents. It is fast, stateless, and has no dependency on normalization or embeddings. Running it in the same chain as the LLM pipeline would serialize an O(seconds) step behind O(minutes) LLM work.
@@ -235,6 +240,25 @@ extract_explicit_edges [@asset]    reply_graph_preprocess_assets [@graph_multi_a
 **ArangoDB role**: derived graph store. Post documents in ArangoDB are always reproducible from PostgreSQL + enrichment pipeline. ArangoDB should never be treated as a source of truth for raw post content.
 
 ---
+
+### 16. Noise-aware implicit reply detection
+
+**Decision**: `detect_implicit_replies` is made aware of post `content_class` in two ways: (1) the adaptive window expands past noise posts so they don't waste slots, and (2) `content_class` is passed as a label to the LLM for each candidate so it can reason about noise-directed replies.
+
+**Noise-transparent window**:
+
+The original `get_window_keys` function takes the last `adaptive_n` posts before the target by time. If several of those posts are noise (short reactions, "+1", "hihi"), meaningful context posts further back are excluded despite being more relevant. The updated logic walks backwards and counts only non-noise posts toward `adaptive_n`. Noise posts that fall within the selected span are still included in the window (they receive BM25 boost in `fetch_implicit_reply_candidates`) but do not consume a slot.
+
+Example: `adaptive_n=3`, posts before target = `[A(review), noise, B(question), noise, noise]`. Old window: `[B, noise, noise]` — 2 noise slots wasted. New window: `[A, noise, B, noise, noise]` — 3 non-noise posts included, all interleaved noise included.
+
+**Why pass `content_class` to the LLM rather than applying a score penalty**:
+- Hard score penalties (e.g. multiply noise candidate score by 0.3) would suppress valid cases: a post saying "đừng spam nữa" is a genuine reply to a noise post and should be linked.
+- The LLM can distinguish "near noise by time" from "actively responding to noise content" through reasoning. Providing `content_class` as a label in the prompt (e.g. `[candidate 12345 | noise]`) gives the LLM the signal without overriding its judgment.
+- System prompt rule: noise candidates should only be linked if the source post is clearly and directly responding to that specific noise post (e.g. requesting the user to stop spamming, questioning the reaction). Temporal proximity alone is not sufficient.
+
+**`content_class` availability**:
+- `content_class` is written to the `posts` collection by `classify_posts` (via `NormalizedPostDoc` patch). `fetch_partition_posts_for_implicit_reply` now returns it alongside `key`, `text`, `posted_at`, `embedding`, and `partition_key`.
+- Posts not yet enriched (e.g. very short posts below the 20-char threshold) have `content_class = null`; the window and LLM treat these as `"unknown"`, not noise.
 
 ### 10. PostgreSQL connection management: max_connections=300 + engine disposal
 
