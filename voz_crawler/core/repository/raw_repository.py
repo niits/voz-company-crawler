@@ -58,6 +58,28 @@ class RawRepository:
                 for r in conn.execute(stmt).mappings()
             ]
 
+    def fetch_posts_with_html(self, page_url: str) -> list[RawPost]:
+        """Return all posts with raw_content_html for a given page URL (for normalization)."""
+        t = self._table
+        stmt = (
+            select(t.c.post_id_on_site, t.c.raw_content_html)
+            .where(t.c.page_url == page_url)
+            .where(t.c.raw_content_html.isnot(None))
+            .order_by(t.c.post_id_on_site)
+        )
+        with self._engine.connect() as conn:
+            return [
+                RawPost(
+                    post_id_on_site=r["post_id_on_site"],
+                    author_username=None,
+                    author_id_on_site=None,
+                    posted_at_raw=None,
+                    raw_content_text=None,
+                    raw_content_html=r["raw_content_html"],
+                )
+                for r in conn.execute(stmt).mappings()
+            ]
+
     def fetch_posts_with_blockquotes(self, page_url: str) -> list[RawPost]:
         """Return posts that contain XenForo quote blocks for a given page URL."""
         t = self._table

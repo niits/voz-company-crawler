@@ -7,25 +7,31 @@ from dagster_openai import OpenAIResource
 
 from voz_crawler.defs.assets.ingestion import voz_page_posts_assets
 from voz_crawler.defs.assets.reply_graph import (
-    compute_embeddings,
+    detect_implicit_replies,
     extract_explicit_edges,
+    reply_graph_llm_assets,
+    reply_graph_preprocess_assets,
     sync_posts_to_arango,
 )
 from voz_crawler.defs.jobs.ingestion import crawl_page_job, discover_pages_job
+from voz_crawler.defs.jobs.reply_graph import implicit_reply_job, reply_graph_job
 from voz_crawler.defs.resources.arango_resource import ArangoDBResource
 from voz_crawler.defs.resources.crawler_resource import CrawlerResource
 from voz_crawler.defs.resources.postgres_resource import PostgresResource
 from voz_crawler.defs.sensors.ingestion import voz_crawl_sensor, voz_discover_sensor
+from voz_crawler.defs.sensors.reply_graph import implicit_reply_sensor
 
 defs = Definitions(
     assets=[
         voz_page_posts_assets,
         sync_posts_to_arango,
         extract_explicit_edges,
-        compute_embeddings,
+        reply_graph_preprocess_assets,
+        reply_graph_llm_assets,
+        detect_implicit_replies,
     ],
-    jobs=[crawl_page_job, discover_pages_job],
-    sensors=[voz_discover_sensor, voz_crawl_sensor],
+    jobs=[crawl_page_job, discover_pages_job, reply_graph_job, implicit_reply_job],
+    sensors=[voz_discover_sensor, voz_crawl_sensor, implicit_reply_sensor],
     resources={
         "dagster_dlt": DagsterDltResource(),
         "postgres": PostgresResource(

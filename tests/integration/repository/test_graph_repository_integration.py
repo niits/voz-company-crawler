@@ -9,7 +9,7 @@ Run with:
 
 import pytest
 
-from voz_crawler.core.entities.arango import ArangoEdge, ArangoPost, EmbedPatch
+from voz_crawler.core.entities.arango import ArangoEdge, EmbedPatch, NormalizedPostDoc, RawPostDoc
 from voz_crawler.core.repository.graph_repository import GraphRepository
 
 PARTITION_KEY = "integ:page:1"
@@ -21,8 +21,10 @@ def _repo(db) -> GraphRepository:
     return GraphRepository(db=db)
 
 
-def _post(key: str, content_hash: str = "hash_x", text: str = "long enough content here") -> ArangoPost:
-    return ArangoPost(
+def _post(
+    key: str, content_hash: str = "hash_x", text: str = "long enough content here"
+) -> RawPostDoc:
+    return RawPostDoc(
         key=key,
         post_id=int(key),
         author_username="tester",
@@ -33,7 +35,6 @@ def _post(key: str, content_hash: str = "hash_x", text: str = "long enough conte
         partition_key=PARTITION_KEY,
         thread_url=THREAD_URL,
         page_number=1,
-        embedding=None,
     )
 
 
@@ -95,36 +96,31 @@ def test_upsert_replace_updates_hash(clean_arango_db):
 
 
 @pytest.mark.integration
-def test_upsert_replace_resets_embedding(clean_arango_db):
-    """Replace semantics must reset embedding to null on content change."""
+def test_upsert_replace_resets_layer2_fields(clean_arango_db):
+    """Replace semantics must reset Layer 2 fields (embedding, content_class) on content change.
+
+    Simulate: first upsert a RawPostDoc, then manually patch a Layer 2 field (embedding)
+    directly on the document, then re-upsert with new hash. The replace should clear
+    the Layer 2 field since it's not part of RawPostDoc.
+    """
     repo = _repo(clean_arango_db)
-    # Insert with an embedding already set
-    post_with_embedding = ArangoPost(
-        key="8004",
-        post_id=8004,
-        author_username="u",
-        author_id="80040",
-        posted_at=None,
-        content_text="some text",
-        content_hash="hash_v1",
-        partition_key=PARTITION_KEY,
-        thread_url=THREAD_URL,
-        page_number=1,
-        embedding=[0.1, 0.2, 0.3],
-    )
-    repo.upsert_posts([post_with_embedding])
-    # Re-upsert with new content → embedding should be cleared
+    repo.upsert_posts([_post("8004", "hash_v1")])
+    # Manually patch an embedding (simulates compute_embeddings having run)
+    clean_arango_db.collection("posts").update({"_key": "8004", "embedding": [0.1, 0.2, 0.3]})
+    assert clean_arango_db.collection("posts").get("8004")["embedding"] is not None
+
+    # Re-upsert with new content hash → on_duplicate=replace clears embedding
     repo.upsert_posts([_post("8004", "hash_v2")])
 
     doc = clean_arango_db.collection("posts").get("8004")
-    assert doc["embedding"] is None
+    assert doc.get("embedding") is None
 
 
 @pytest.mark.integration
 def test_get_existing_hashes_only_for_partition(clean_arango_db):
     """Hashes from other partitions must not bleed into the result."""
     repo = _repo(clean_arango_db)
-    post_other = ArangoPost(
+    post_other = RawPostDoc(
         key="9001",
         post_id=9001,
         author_username="u",
@@ -135,7 +131,6 @@ def test_get_existing_hashes_only_for_partition(clean_arango_db):
         partition_key=OTHER_PARTITION,
         thread_url=THREAD_URL,
         page_number=2,
-        embedding=None,
     )
     repo.upsert_posts([_post("8010"), post_other])
     hashes = repo.get_existing_hashes(PARTITION_KEY)
@@ -150,6 +145,21 @@ def test_get_existing_hashes_only_for_partition(clean_arango_db):
 def test_fetch_posts_needing_embedding_returns_null_embedding_posts(clean_arango_db):
     repo = _repo(clean_arango_db)
     repo.upsert_posts([_post("8020"), _post("8021")])
+    # fetch_posts_needing_embedding requires normalized_own_text to be populated first
+    repo.update_post_normalizations(
+        [
+            NormalizedPostDoc(
+                key="8020",
+                normalized_own_text="long enough normalized text here",
+                normalization_version=1,
+            ),
+            NormalizedPostDoc(
+                key="8021",
+                normalized_own_text="long enough normalized text here",
+                normalization_version=1,
+            ),
+        ]
+    )
     items = repo.fetch_posts_needing_embedding(PARTITION_KEY)
     keys = {i.key for i in items}
     assert "8020" in keys
@@ -160,9 +170,16 @@ def test_fetch_posts_needing_embedding_returns_null_embedding_posts(clean_arango
 def test_fetch_posts_needing_embedding_excludes_already_embedded(clean_arango_db):
     repo = _repo(clean_arango_db)
     repo.upsert_posts([_post("8030")])
-    repo.update_post_embeddings(
-        [EmbedPatch(key="8030", embedding=[0.1, 0.2], embedding_model="m")]
+    repo.update_post_normalizations(
+        [
+            NormalizedPostDoc(
+                key="8030",
+                normalized_own_text="long enough normalized text here",
+                normalization_version=1,
+            ),
+        ]
     )
+    repo.update_post_embeddings([EmbedPatch(key="8030", embedding=[0.1, 0.2], embedding_model="m")])
     items = repo.fetch_posts_needing_embedding(PARTITION_KEY)
     assert "8030" not in {i.key for i in items}
 
@@ -171,7 +188,7 @@ def test_fetch_posts_needing_embedding_excludes_already_embedded(clean_arango_db
 def test_fetch_posts_needing_embedding_excludes_short_content(clean_arango_db):
     """Posts with content shorter than 20 chars must be excluded."""
     repo = _repo(clean_arango_db)
-    short_post = ArangoPost(
+    short_post = RawPostDoc(
         key="8040",
         post_id=8040,
         author_username="u",
@@ -182,7 +199,6 @@ def test_fetch_posts_needing_embedding_excludes_short_content(clean_arango_db):
         partition_key=PARTITION_KEY,
         thread_url=THREAD_URL,
         page_number=1,
-        embedding=None,
     )
     repo.upsert_posts([short_post])
     items = repo.fetch_posts_needing_embedding(PARTITION_KEY)

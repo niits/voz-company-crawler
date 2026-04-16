@@ -18,6 +18,11 @@ dependencies = [
     "dagster-openai",
     "sqlalchemy>=2.0",
     "sqlmodel>=0.0.38",
+    "pydantic-ai>=1.70.0",
+    "nbconvert>=7.17.0",
+    "numpy>=2.4.4",
+    "rank-bm25>=0.2.2",
+    "pydantic-ai-slim[logfire]>=1.70.0",
 ]
 
 [project.optional-dependencies]

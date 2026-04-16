@@ -60,9 +60,11 @@ def section(title: str) -> None:
 
 # ── stage builders ────────────────────────────────────────────────────────────
 
+
 def _make_raw_posts():
-    from voz_crawler.core.entities.raw_post import RawPost
     from datetime import datetime, timezone
+
+    from voz_crawler.core.entities.raw_post import RawPost
 
     return [
         RawPost(
@@ -86,10 +88,12 @@ def _make_raw_posts():
 
 def _make_repo(db):
     from voz_crawler.core.repository.graph_repository import GraphRepository
+
     return GraphRepository(db=db)
 
 
 # ── smoke stages ─────────────────────────────────────────────────────────────
+
 
 def smoke_connectivity(db) -> bool:
     """Stage 0: verify we can reach ArangoDB and our test DB exists."""
@@ -117,7 +121,7 @@ def smoke_schema(db) -> None:
 
 
 def smoke_stage1_post_sync(db) -> None:
-    """Stage 1: simulate sync_posts_to_graph — RawPosts → ArangoPost nodes."""
+    """Stage 1: simulate sync_posts_to_graph — RawPosts → RawPostDoc nodes."""
     section("Stage 1 — Post Sync (sync_posts_to_graph)")
     from voz_crawler.core.graph.post_sync import build_upsert_docs
 
@@ -143,9 +147,8 @@ def smoke_stage1_post_sync(db) -> None:
 def smoke_stage2_edge_sync(db) -> None:
     """Stage 2: simulate extract_explicit_edges — HTML quotes → ArangoEdge documents."""
     section("Stage 2 — Edge Sync (extract_explicit_edges)")
-    from voz_crawler.core.entities.raw_post import RawPost
+
     from voz_crawler.core.graph.edge_sync import build_edges
-    from datetime import datetime, timezone
 
     rows_with_html = _make_raw_posts()
     # edge_sync needs raw_content_html — which post_sync drops; use the original rows
@@ -186,7 +189,11 @@ def smoke_stage3_embeddings(db) -> None:
     repo.update_post_embeddings(fake_patches)
 
     needing_after = repo.fetch_posts_needing_embedding(PARTITION_KEY)
-    check("0 posts need embedding after patching", len(needing_after) == 0, f"got {len(needing_after)}")
+    check(
+        "0 posts need embedding after patching",
+        len(needing_after) == 0,
+        f"got {len(needing_after)}",
+    )
 
     doc = db.collection("posts").get("2001")
     check("embedding vector persisted on post 2001", doc.get("embedding") == [0.1, 0.2, 0.3])
@@ -194,6 +201,7 @@ def smoke_stage3_embeddings(db) -> None:
 
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
+
 
 def main() -> int:
     print("=" * 56)
@@ -203,6 +211,7 @@ def main() -> int:
     # Connect and create a fresh smoke database
     try:
         from arango import ArangoClient
+
         client = ArangoClient(hosts=f"http://{ARANGO_HOST}:{ARANGO_PORT}")
         sys_db = client.db("_system", username="root", password=ARANGO_PASSWORD)
         if sys_db.has_database(SMOKE_DB_NAME):

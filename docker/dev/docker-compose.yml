@@ -58,7 +58,7 @@ services:
       - "--port=8080"
       - "--dsn=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
     ports:
-      - "8080:8080"
+      - "8888:8080"
     networks:
       - voz_net
     depends_on:
