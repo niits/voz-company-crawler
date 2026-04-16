@@ -30,7 +30,7 @@ def normalize_post_html(html: str) -> dict:
         source_post_id = None
         if source_raw.startswith("post: "):
             try:
-                source_post_id = int(source_raw[len("post: "):].strip())
+                source_post_id = int(source_raw[len("post: ") :].strip())
             except ValueError:
                 pass
 

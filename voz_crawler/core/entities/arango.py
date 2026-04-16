@@ -12,14 +12,14 @@ class RawPostDoc(SQLModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    key: str = Field(alias="_key")          # str(post_id_on_site)
+    key: str = Field(alias="_key")  # str(post_id_on_site)
     post_id: int
     author_username: str | None
     author_id: str | None
-    posted_at: str | None                   # ISO datetime
-    content_text: str | None                # raw full text including quoted blocks
-    content_hash: str                       # SHA-256(content_text); change triggers re-enrichment
-    partition_key: str                      # "{thread_id}:{page_number}"
+    posted_at: str | None  # ISO datetime
+    content_text: str | None  # raw full text including quoted blocks
+    content_hash: str  # SHA-256(content_text); change triggers re-enrichment
+    partition_key: str  # "{thread_id}:{page_number}"
     thread_url: str
     page_number: int
 
@@ -47,7 +47,7 @@ class NormalizedPostDoc(SQLModel):
     embedding_model: str | None = None
 
     # Owned by: classify_posts (fast-filter projections from ExtractionResultDoc)
-    content_class: str | None = None                # review | rating | event | question | noise
+    content_class: str | None = None  # review | rating | event | question | noise
     content_class_confidence: float | None = None
     has_company_mention: bool | None = None
     enrichment_version: int | None = None
@@ -64,8 +64,8 @@ class ExtractionResultDoc(SQLModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    key: str = Field(alias="_key")          # f"{post_key}_{enrichment_version}"
-    post_key: str                           # references posts/{post_key}
+    key: str = Field(alias="_key")  # f"{post_key}_{enrichment_version}"
+    post_key: str  # references posts/{post_key}
     partition_key: str
     enrichment_version: int
 
@@ -74,20 +74,20 @@ class ExtractionResultDoc(SQLModel):
     content_class_confidence: float
 
     # Company mentions — full LLM output stored verbatim
-    company_mentions: list[dict]            # list[CompanyMentionResult.model_dump()]
+    company_mentions: list[dict]  # list[CompanyMentionResult.model_dump()]
 
     # Alias definitions the LLM detected in this post
-    alias_definitions: list[dict]           # list[AliasDefinitionResult.model_dump()]
+    alias_definitions: list[dict]  # list[AliasDefinitionResult.model_dump()]
 
     # Implicit reply decisions — written by detect_implicit_replies after classify_posts
-    implicit_replies: list[dict]            # list[ImplicitReply.model_dump()]
+    implicit_replies: list[dict]  # list[ImplicitReply.model_dump()]
 
     # Full PydanticAI message history for audit (system prompt + user input + assistant output)
-    messages_json: list[dict] | None        # allows re-projection without re-calling LLM
+    messages_json: list[dict] | None  # allows re-projection without re-calling LLM
 
     # Provenance
-    model_used: str                         # e.g. "gpt-4o-mini"
-    extracted_at: str                       # ISO datetime
+    model_used: str  # e.g. "gpt-4o-mini"
+    extracted_at: str  # ISO datetime
 
 
 class ArangoEdge(SQLModel):
@@ -100,12 +100,12 @@ class ArangoEdge(SQLModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    from_vertex: str = Field(alias="_from")     # "posts/{post_id}"
-    to_vertex: str = Field(alias="_to")         # "posts/{post_id}"
+    from_vertex: str = Field(alias="_from")  # "posts/{post_id}"
+    to_vertex: str = Field(alias="_to")  # "posts/{post_id}"
     key: str = Field(alias="_key")
     quote_ordinal: int
-    confidence: float                           # 1.0 for html_metadata; LLM score for implicit_llm
-    method: str                                 # "html_metadata" | "implicit_llm"
+    confidence: float  # 1.0 for html_metadata; LLM score for implicit_llm
+    method: str  # "html_metadata" | "implicit_llm"
     partition_key: str
 
 

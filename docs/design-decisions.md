@@ -153,15 +153,86 @@ Architectural and implementation decisions for the Voz Company Crawler.
 
 ---
 
-### 13. AutomationCondition.eager() for reply_graph assets
+### 13. Reply graph asset topology: parallel branches + in-memory op chains
 
-**Decision**: All three reply_graph assets (`sync_posts_to_arango`, `extract_explicit_edges`, `compute_embeddings`) use `AutomationCondition.eager()` with `IdentityPartitionMapping`.
+**Decision**: Split the reply graph pipeline into five assets across two parallel branches. Within each multi-op asset, data flows as in-memory Python objects; ArangoDB is only touched at the read and write boundaries.
+
+**Topology**:
+
+```
+dlt_voz_posts
+    │
+    ▼
+sync_posts_to_arango  [@asset]
+    │
+    ├────────────────────────────────────────┐
+    ▼                                        ▼
+extract_explicit_edges [@asset]    reply_graph_preprocess_assets [@graph_multi_asset]
+                                   (normalize_posts, compute_embeddings)
+                                             │
+                                             ▼
+                                   reply_graph_llm_assets [@graph_multi_asset]
+                                   (classify_posts, extract_company_mentions)
+                                             │
+                                             ▼
+                                   detect_implicit_replies [@asset]
+```
+
+**Why two parallel branches after sync**:
+- `extract_explicit_edges` parses blockquote HTML and writes edge documents. It is fast, stateless, and has no dependency on normalization or embeddings. Running it in the same chain as the LLM pipeline would serialize an O(seconds) step behind O(minutes) LLM work.
+- `reply_graph_preprocess_assets` and `extract_explicit_edges` both use `AutomationCondition.eager()` — Dagster triggers them concurrently the moment `sync_posts_to_arango` materializes.
+
+**Why `reply_graph_llm_assets` depends on `compute_embeddings`, not `sync_posts_to_arango`**:
+- The LLM enrichment step (`_classify_op`) only needs posts with populated `normalized_own_text` and `embedding`. It has no direct requirement on the sync step — the preprocess group is the actual upstream gate.
+- Declaring the dep on `compute_embeddings` (the last output of the preprocess group) makes the data dependency explicit in the asset graph and avoids a spurious transitive dep.
+
+**In-memory op chain pattern**:
+- Each `@graph_multi_asset` starts with a single `_fetch_*` op that reads from ArangoDB (staleness check) and PostgreSQL (raw rows). Remaining ops are pure transforms or API calls with no DB access. A final `_write_*` op performs one bulk upsert. This eliminates N×2 round-trips (one read + one write per op) and makes each transform independently testable without a DB fixture.
+
+**AutomationCondition.eager() scope**:
+- All assets except `detect_implicit_replies` carry `eager()`. The implicit reply asset is sensor-gated (cross-partition lookback window) and must not auto-trigger on every preprocess run.
+
+**Trade-off**: `graph_multi_asset` does not accept `automation_condition` at decoration time; it must be applied post-hoc via `.with_attributes(automation_condition=AutomationCondition.eager())` on the multi-asset objects.
+
+---
+
+### 14. Staleness detection via version fields — no cascade writes
+
+**Decision**: Each enrichment layer detects its own staleness by comparing version constants in code against version fields stored on the document. No layer propagates a "needs reprocessing" flag to downstream documents.
+
+**Version fields on post documents**:
+
+| Field | Owner asset | Meaning |
+|---|---|---|
+| `normalization_version` | `normalize_posts` | Version of the normalization logic applied |
+| `embedding_model` | `compute_embeddings` | OpenAI model name used for the embedding |
+| `enrichment_version` | `classify_posts` (via `ExtractionResultDoc`) | Version of the LLM extraction prompt/schema |
+
+**Staleness checks** (in `_fetch_*` ops):
+- Preprocess: post needs processing if `normalization_version < NORMALIZATION_VERSION OR embedding_model != EMBEDDING_MODEL`
+- LLM: post needs processing if no `ExtractionResultDoc` exists with `enrichment_version == ENRICHMENT_VERSION`
+
+**Why no cascade writes**:
+- Writing a `needs_reprocess=True` flag on content change couples the sync layer to enrichment layer semantics. If enrichment adds a new version field, sync must be updated too.
+- Version-constant staleness checks are self-contained: bumping `NORMALIZATION_VERSION` in code is the only action needed to trigger a backfill. Dagster `eager()` propagates re-materialization naturally through the asset graph.
+
+**Cascade path when bumping `NORMALIZATION_VERSION`**:
+1. `reply_graph_preprocess_assets` re-runs (staleness check triggers)
+2. `compute_embeddings` output re-materializes → `reply_graph_llm_assets` eager-triggers
+3. `_fetch_llm_op` checks `ExtractionResultDoc.enrichment_version` — unchanged constant → no LLM re-run unless `ENRICHMENT_VERSION` is also bumped
+
+---
+
+### 15. PostgreSQL is retained as the source-of-truth raw store
+
+**Decision**: PostgreSQL (`raw.voz__posts`) is kept as the authoritative raw data store. All enrichment layers read from it as needed; ArangoDB holds derived data only.
 
 **Rationale**:
-- `eager()` triggers materialisation as soon as all upstream partitions are materialised — no custom sensor needed for the reply graph pipeline.
-- `IdentityPartitionMapping` maps each `voz_page_posts_assets` partition key directly to the same-keyed reply graph partition, preserving per-page isolation.
+- dlt's `write_disposition="merge"` with `primary_key="post_id_on_site"` provides idempotent upsert semantics for free — rewriting this for direct ArangoDB ingestion would require significant custom logic.
+- PostgreSQL is the only recovery path: if ArangoDB data is corrupted or schema migrations are needed, the full graph can be re-derived from `raw.voz__posts` by replaying the enrichment pipeline.
+- The cost of one SQL read per partition per enrichment op is negligible compared to OpenAI API latency.
 
-**Trade-off**: `eager()` fires on every upstream materialisation, including re-runs of historical pages. This is intentional — re-crawling a page should always re-sync its graph data.
+**ArangoDB role**: derived graph store. Post documents in ArangoDB are always reproducible from PostgreSQL + enrichment pipeline. ArangoDB should never be treated as a source of truth for raw post content.
 
 ---
 

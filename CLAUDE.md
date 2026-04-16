@@ -22,12 +22,17 @@ voz_crawler/
   core/
     entities/
       raw_post.py         RawPost SQLModel (mirrors raw.voz__posts columns)
-      arango.py           ArangoPost, ArangoEdge, EmbedItem, EmbedPatch entities
+      arango.py           RawPostDoc, NormalizedPostDoc, ExtractionResultDoc, ArangoEdge
+      enrichment.py       NORMALIZATION_VERSION, ENRICHMENT_VERSION constants + enrichment types
     graph/
       post_sync.py        build_upsert_docs — diff rows vs existing hashes
       edge_sync.py        build_edges — parse blockquotes into ArangoEdge list
       quote_parser.py     extract_quote_edges — BeautifulSoup XenForo quote parser
-      embedding_sync.py   embed_and_update — batched OpenAI embedding + ArangoDB patch
+      normalizer.py       normalize_post_html — strip quoted blocks, return own_text
+      embedding_sync.py   embed_batch — pure transform, returns list[EmbedPatch] (no DB write)
+      enrichment_sync.py  enrich_partition — pure LLM transform, returns list[ExtractionResultDoc]
+      company_sync.py     build_company_mention_docs — pure projection from ExtractionResultDocs
+      implicit_reply_sync.py  process_partition_implicit_replies — BM25+cosine+LLM implicit edges
     ingestion/
       html_source/
         html_parser.py    BeautifulSoup post extractor (extract_posts)
@@ -38,7 +43,11 @@ voz_crawler/
   defs/
     assets/
       ingestion.py        @dlt_assets: voz_page_posts_assets (partitioned)
-      reply_graph.py      sync_posts_to_arango, extract_explicit_edges, compute_embeddings
+      reply_graph.py      5 assets: sync_posts_to_arango (@asset),
+                            extract_explicit_edges (@asset),
+                            reply_graph_preprocess_assets (@graph_multi_asset: normalize_posts + compute_embeddings),
+                            reply_graph_llm_assets (@graph_multi_asset: classify_posts + extract_company_mentions),
+                            detect_implicit_replies (@asset, sensor-gated)
     jobs/
       ingestion.py        crawl_page_job + discover_pages_job
       reply_graph.py      reply_graph_job (all reply_graph assets, partitioned)
@@ -121,15 +130,41 @@ On Cloudflare block (403/429/503), the asset raises `RuntimeError`. Safe — nex
 
 ## Reply Graph Pipeline
 
-Three assets in the `reply_graph` group run after each successful crawl partition:
+Five assets in the `reply_graph` group run after each successful crawl partition. They form two parallel branches that fan out from `sync_posts_to_arango`.
 
-**`sync_posts_to_arango`** — reads `raw.voz__posts` for the page URL, diffs against existing ArangoDB documents by `content_hash`, and upserts only changed/new posts. Changed posts have `embedding=None` reset to trigger re-embedding.
+### Asset execution order
 
-**`extract_explicit_edges`** — re-parses XenForo `<blockquote>` HTML for the same partition, drops all existing quote edges for that partition, and re-inserts fresh edges into the `quotes` edge collection.
+```
+sync_posts_to_arango
+    ├── extract_explicit_edges          (parallel branch A — fast, stateless)
+    └── reply_graph_preprocess_assets   (parallel branch B)
+            └── reply_graph_llm_assets
+                    └── detect_implicit_replies  (sensor-gated only)
+```
 
-**`compute_embeddings`** — fetches posts with `embedding == null` for the partition, calls OpenAI `text-embedding-3-small` in batches of 100, and patches embeddings back to ArangoDB.
+### Asset descriptions
 
-All three use `AutomationCondition.eager()` and `IdentityPartitionMapping` to mirror the `voz_page_posts_assets` partition key exactly.
+**`sync_posts_to_arango`** `[@asset]` — reads `raw.voz__posts` for the page URL, diffs against existing ArangoDB documents by `content_hash`, upserts only changed/new posts. Changed posts have Layer 2 fields reset to null, propagating staleness to downstream enrichment.
+
+**`extract_explicit_edges`** `[@asset]` — re-parses XenForo `<blockquote>` HTML, drops all existing `quotes` edges for the partition, re-inserts fresh edges. Runs concurrently with the preprocess branch.
+
+**`reply_graph_preprocess_assets`** `[@graph_multi_asset → normalize_posts, compute_embeddings]` — in-memory chain: one DB read (staleness check + PG fetch) → normalize HTML → embed with OpenAI → one bulk write to ArangoDB. Staleness: `normalization_version < NORMALIZATION_VERSION OR embedding_model != EMBEDDING_MODEL`.
+
+**`reply_graph_llm_assets`** `[@graph_multi_asset → classify_posts, extract_company_mentions]` — in-memory chain: one DB read (staleness check) → LLM classification + mention extraction → one bulk write. Depends on `compute_embeddings` (not `sync_posts_to_arango`). Staleness: no `ExtractionResultDoc` with `enrichment_version == ENRICHMENT_VERSION`.
+
+**`detect_implicit_replies`** `[@asset]` — BM25 + cosine re-rank + PydanticAI agent to detect implicit reply edges. No `AutomationCondition.eager()` — triggered by `implicit_reply_sensor` only after all lower-numbered partitions have materialized `extract_company_mentions`.
+
+### AutomationCondition
+
+All assets except `detect_implicit_replies` use `AutomationCondition.eager()` with `IdentityPartitionMapping`. The `.with_attributes()` call is applied post-hoc to `@graph_multi_asset` objects since the decorator does not accept `automation_condition` directly.
+
+### Version constants (in `core/entities/enrichment.py`)
+
+| Constant | Controls |
+|---|---|
+| `NORMALIZATION_VERSION` | When to re-normalize post HTML |
+| `EMBEDDING_MODEL` | When to re-embed (model name change) |
+| `ENRICHMENT_VERSION` | When to re-run LLM classification |
 
 ### ArangoDB Schema
 

@@ -56,6 +56,7 @@ def build_company_mention_docs(
 
         for alias_def in doc.get("alias_definitions", []):
             import re
+
             alias_slug = re.sub(r"[^a-z0-9]+", "-", alias_def["alias"].lower()).strip("-")
             company_slug = re.sub(r"[^a-z0-9]+", "-", alias_def["company_name"].lower()).strip("-")
             alias_evidence_docs.append(

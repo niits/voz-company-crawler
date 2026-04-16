@@ -16,10 +16,10 @@ from voz_crawler.core.entities.enrichment import (
 # ── Adaptive window parameters ────────────────────────────────────────────────
 RATE_WINDOW_HOURS = 2
 BASE_N = 5
-BASE_RATE = 10.0        # posts/hour reference rate
+BASE_RATE = 10.0  # posts/hour reference rate
 MIN_WINDOW = 2
 MAX_WINDOW = 20
-BASE_LOOKBACK = 24.0    # hours at reference rate
+BASE_LOOKBACK = 24.0  # hours at reference rate
 MIN_RATE = 1.0
 MIN_LOOKBACK_H = 2.0
 MAX_LOOKBACK_H = 168.0  # 7 days
@@ -63,16 +63,14 @@ def get_window_keys(posts_sorted: list[dict], target_idx: int) -> list[str]:
     win_start = t_p - timedelta(hours=RATE_WINDOW_HOURS)
 
     recent = [
-        p for p in posts_sorted[:target_idx]
-        if datetime.fromisoformat(p["posted_at"]) >= win_start
+        p for p in posts_sorted[:target_idx] if datetime.fromisoformat(p["posted_at"]) >= win_start
     ]
     reply_rate = len(recent) / RATE_WINDOW_HOURS
     adaptive_n, max_lookback = compute_adaptive_window(reply_rate)
 
     lb_start = t_p - timedelta(hours=max_lookback)
     candidates = [
-        p for p in posts_sorted[:target_idx]
-        if datetime.fromisoformat(p["posted_at"]) >= lb_start
+        p for p in posts_sorted[:target_idx] if datetime.fromisoformat(p["posted_at"]) >= lb_start
     ]
     return [p["key"] for p in candidates[-adaptive_n:]]
 
@@ -83,9 +81,7 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
     return float(np.dot(va, vb) / denom) if denom > 0 else 0.0
 
 
-def _rerank_with_embedding(
-    candidates: list[dict], source_embedding: list[float]
-) -> list[dict]:
+def _rerank_with_embedding(candidates: list[dict], source_embedding: list[float]) -> list[dict]:
     """Add emb_sim to candidates and re-sort by combined score."""
     for c in candidates:
         emb = c.get("embedding")
@@ -96,10 +92,7 @@ def _rerank_with_embedding(
         c["score"] = 0.5 * c["emb_sim"] + 0.3 * bm25_norm + window_boost
 
     # Filter: must pass embedding similarity floor (unless in window)
-    filtered = [
-        c for c in candidates
-        if c["emb_sim"] >= MIN_EMB_SIM or c.get("score", 0) > 0.2
-    ]
+    filtered = [c for c in candidates if c["emb_sim"] >= MIN_EMB_SIM or c.get("score", 0) > 0.2]
     return sorted(filtered, key=lambda x: x["score"], reverse=True)[:TOP_N_CANDIDATES]
 
 
@@ -158,8 +151,7 @@ def process_partition_implicit_replies(
                 continue
 
             candidate_text = "\n\n".join(
-                f"[candidate {c['key']}] {(c.get('text') or '')[:300]}"
-                for c in top
+                f"[candidate {c['key']}] {(c.get('text') or '')[:300]}" for c in top
             )
             prompt = (
                 f"SOURCE POST [{src['key']}]:\n{(src.get('text') or '')[:500]}\n\n"
@@ -195,9 +187,7 @@ def process_partition_implicit_replies(
                 )
 
             if new_implicit:
-                repo.patch_extraction_implicit_replies(
-                    src["key"], ENRICHMENT_VERSION, new_implicit
-                )
+                repo.patch_extraction_implicit_replies(src["key"], ENRICHMENT_VERSION, new_implicit)
             stats.posts_processed += 1
 
         except Exception:

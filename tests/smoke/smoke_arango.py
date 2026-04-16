@@ -60,6 +60,7 @@ def section(title: str) -> None:
 
 # ── stage builders ────────────────────────────────────────────────────────────
 
+
 def _make_raw_posts():
     from datetime import datetime, timezone
 
@@ -87,10 +88,12 @@ def _make_raw_posts():
 
 def _make_repo(db):
     from voz_crawler.core.repository.graph_repository import GraphRepository
+
     return GraphRepository(db=db)
 
 
 # ── smoke stages ─────────────────────────────────────────────────────────────
+
 
 def smoke_connectivity(db) -> bool:
     """Stage 0: verify we can reach ArangoDB and our test DB exists."""
@@ -186,7 +189,11 @@ def smoke_stage3_embeddings(db) -> None:
     repo.update_post_embeddings(fake_patches)
 
     needing_after = repo.fetch_posts_needing_embedding(PARTITION_KEY)
-    check("0 posts need embedding after patching", len(needing_after) == 0, f"got {len(needing_after)}")
+    check(
+        "0 posts need embedding after patching",
+        len(needing_after) == 0,
+        f"got {len(needing_after)}",
+    )
 
     doc = db.collection("posts").get("2001")
     check("embedding vector persisted on post 2001", doc.get("embedding") == [0.1, 0.2, 0.3])
@@ -194,6 +201,7 @@ def smoke_stage3_embeddings(db) -> None:
 
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
+
 
 def main() -> int:
     print("=" * 56)
@@ -203,6 +211,7 @@ def main() -> int:
     # Connect and create a fresh smoke database
     try:
         from arango import ArangoClient
+
         client = ArangoClient(hosts=f"http://{ARANGO_HOST}:{ARANGO_PORT}")
         sys_db = client.db("_system", username="root", password=ARANGO_PASSWORD)
         if sys_db.has_database(SMOKE_DB_NAME):

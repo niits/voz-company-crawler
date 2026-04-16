@@ -5,7 +5,7 @@ from voz_crawler.core.graph.quote_parser import extract_quote_edges
 
 def build_edges(rows: list[RawPost], partition_key: str) -> list[ArangoEdge]:
     """
-    Parse blockquotes from each post's HTML 
+    Parse blockquotes from each post's HTML
     and return edge entities tagged with partition_key.
     """
     edges: list[ArangoEdge] = []

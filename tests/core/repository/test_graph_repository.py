@@ -4,7 +4,6 @@ Uses a MagicMock arango db (arango_db fixture from conftest.py).
 Each test section configures the mock's return values to exercise one method.
 """
 
-
 from voz_crawler.core.entities.arango import ArangoEdge, EmbedItem, EmbedPatch, RawPostDoc
 from voz_crawler.core.repository.graph_repository import GraphRepository
 

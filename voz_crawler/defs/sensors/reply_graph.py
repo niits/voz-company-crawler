@@ -71,7 +71,5 @@ def implicit_reply_sensor(context: MultiAssetSensorEvaluationContext) -> SensorR
             skip_reason="Preceding partitions not yet fully enriched for any new partition."
         )
 
-    context.log.info(
-        f"[implicit_reply_sensor] triggering {len(run_requests)} run(s): {triggered}"
-    )
+    context.log.info(f"[implicit_reply_sensor] triggering {len(run_requests)} run(s): {triggered}")
     return SensorResult(run_requests=run_requests)

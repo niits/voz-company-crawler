@@ -59,7 +59,9 @@ def test_first_sync_upserts_all_posts(clean_arango_db, sqlite_engine):
 
     rows = raw_repo.fetch_posts(TEST_PAGE_URL)
     existing = graph_repo.get_existing_hashes(TEST_PARTITION_KEY)
-    docs, skipped = build_upsert_docs(rows, existing, TEST_PARTITION_KEY, TEST_THREAD_URL, TEST_PAGE_NUMBER)
+    docs, skipped = build_upsert_docs(
+        rows, existing, TEST_PARTITION_KEY, TEST_THREAD_URL, TEST_PAGE_NUMBER
+    )
 
     assert skipped == 0
     assert len(docs) == 2
@@ -83,7 +85,9 @@ def test_second_sync_skips_unchanged_posts(clean_arango_db, sqlite_engine):
 
     # Second sync — same rows, same content
     existing = graph_repo.get_existing_hashes(TEST_PARTITION_KEY)
-    docs2, skipped2 = build_upsert_docs(rows, existing, TEST_PARTITION_KEY, TEST_THREAD_URL, TEST_PAGE_NUMBER)
+    docs2, skipped2 = build_upsert_docs(
+        rows, existing, TEST_PARTITION_KEY, TEST_THREAD_URL, TEST_PAGE_NUMBER
+    )
 
     assert skipped2 == 2
     assert len(docs2) == 0
@@ -103,15 +107,19 @@ def test_changed_content_triggers_re_upsert(clean_arango_db, sqlite_engine):
     # Simulate content change for post 1001
     with sqlite_engine.begin() as conn:
         conn.execute(
-            t("UPDATE voz__posts SET raw_content_text = 'updated content here' WHERE post_id_on_site = 1001")
+            t(
+                "UPDATE voz__posts SET raw_content_text = 'updated content here' WHERE post_id_on_site = 1001"
+            )
         )
 
     rows_updated = raw_repo.fetch_posts(TEST_PAGE_URL)
     existing = graph_repo.get_existing_hashes(TEST_PARTITION_KEY)
-    docs2, skipped2 = build_upsert_docs(rows_updated, existing, TEST_PARTITION_KEY, TEST_THREAD_URL, TEST_PAGE_NUMBER)
+    docs2, skipped2 = build_upsert_docs(
+        rows_updated, existing, TEST_PARTITION_KEY, TEST_THREAD_URL, TEST_PAGE_NUMBER
+    )
 
-    assert skipped2 == 1          # post 1002 unchanged
-    assert len(docs2) == 1        # post 1001 re-upserted
+    assert skipped2 == 1  # post 1002 unchanged
+    assert len(docs2) == 1  # post 1001 re-upserted
     assert docs2[0].key == "1001"
 
 
@@ -130,21 +138,27 @@ def test_changed_post_resets_embedding(clean_arango_db, sqlite_engine):
     graph_repo.upsert_posts(docs)
 
     # Patch embeddings as if compute_embeddings ran
-    graph_repo.update_post_embeddings([
-        EmbedPatch(key="1001", embedding=[0.1, 0.2], embedding_model="m"),
-        EmbedPatch(key="1002", embedding=[0.3, 0.4], embedding_model="m"),
-    ])
+    graph_repo.update_post_embeddings(
+        [
+            EmbedPatch(key="1001", embedding=[0.1, 0.2], embedding_model="m"),
+            EmbedPatch(key="1002", embedding=[0.3, 0.4], embedding_model="m"),
+        ]
+    )
 
     # Change content of post 1001
     with sqlite_engine.begin() as conn:
         conn.execute(
-            t("UPDATE voz__posts SET raw_content_text = 'totally new content here' WHERE post_id_on_site = 1001")
+            t(
+                "UPDATE voz__posts SET raw_content_text = 'totally new content here' WHERE post_id_on_site = 1001"
+            )
         )
 
     rows_updated = raw_repo.fetch_posts(TEST_PAGE_URL)
     existing = graph_repo.get_existing_hashes(TEST_PARTITION_KEY)
-    docs2, _ = build_upsert_docs(rows_updated, existing, TEST_PARTITION_KEY, TEST_THREAD_URL, TEST_PAGE_NUMBER)
+    docs2, _ = build_upsert_docs(
+        rows_updated, existing, TEST_PARTITION_KEY, TEST_THREAD_URL, TEST_PAGE_NUMBER
+    )
     graph_repo.upsert_posts(docs2)
 
     doc = clean_arango_db.collection("posts").get("1001")
-    assert doc["embedding"] is None, "embedding must be reset after content change"
+    assert doc.get("embedding") is None, "embedding must be reset after content change"

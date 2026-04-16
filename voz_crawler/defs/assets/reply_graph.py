@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from dagster import (
     AssetDep,
     AssetExecutionContext,
@@ -11,6 +13,7 @@ from dagster import (
     MetadataValue,
     Nothing,
     OpExecutionContext,
+    Out,
     Output,
     asset,
     graph_multi_asset,
@@ -18,16 +21,15 @@ from dagster import (
 )
 from dagster_openai import OpenAIResource
 
-from voz_crawler.core.entities.arango import NormalizedPostDoc
-from voz_crawler.core.entities.enrichment import ENRICHMENT_VERSION, NORMALIZATION_VERSION
+from voz_crawler.core.entities.arango import EmbedItem, NormalizedPostDoc
+from voz_crawler.core.entities.enrichment import (
+    ENRICHMENT_VERSION,
+    NORMALIZATION_VERSION,
+)
 from voz_crawler.core.graph.company_sync import build_company_mention_docs
 from voz_crawler.core.graph.edge_sync import build_edges
-from voz_crawler.core.graph.embedding_sync import (
-    EMBED_BATCH_SIZE,
-    EMBEDDING_MODEL,
-    embed_and_update,
-)
-from voz_crawler.core.graph.enrichment_sync import enrich_partition
+from voz_crawler.core.graph.embedding_sync import EMBEDDING_MODEL, embed_batch
+from voz_crawler.core.graph.enrichment_sync import EnrichmentStats, run_llm_enrichment
 from voz_crawler.core.graph.implicit_reply_sync import process_partition_implicit_replies
 from voz_crawler.core.graph.normalizer import normalize_post_html
 from voz_crawler.core.graph.post_sync import build_upsert_docs
@@ -43,17 +45,58 @@ def _page_url(partition_key: str, thread_url: str) -> str:
     return build_page_url(thread_url, int(page_num_str))
 
 
-# ── Ops (internal computation units) ────────────────────────────────────────
+# ── Internal bundle types (in-memory only, never serialized) ─────────────────
 
 
-@op(ins={"dlt_voz_posts": In(Nothing)})
-def _sync_posts_op(
-    context: OpExecutionContext,
+@dataclass
+class _ClassifyBundle:
+    """Data flowing between _classify_op and _build_mentions_op."""
+
+    partition_key: str
+    extraction_docs: list
+    enrichment_patches: list
+    stats: EnrichmentStats
+
+
+@dataclass
+class _LLMBundle:
+    """Data flowing into _write_llm_op — everything the LLM group produced."""
+
+    partition_key: str
+    extraction_docs: list
+    enrichment_patches: list
+    mention_docs: list
+    mention_edges: list
+    alias_evidence: list
+    stats: EnrichmentStats
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Branch root — sync_posts_to_arango
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@asset(
+    partitions_def=voz_pages_partitions,
+    group_name="reply_graph",
+    compute_kind="ArangoDB",
+    ins={
+        "dlt_voz_posts": AssetIn(
+            key=AssetKey(["dlt_voz_posts"]),
+            partition_mapping=IdentityPartitionMapping(),
+        )
+    },
+    automation_condition=AutomationCondition.eager(),
+    description="Layer 1 posts in ArangoDB, content-hash diffed from PostgreSQL.",
+)
+def sync_posts_to_arango(
+    context: AssetExecutionContext,
     postgres: PostgresResource,
     arango: ArangoDBResource,
     crawler: CrawlerResource,
-) -> Output[dict]:
-    """Sync raw.voz__posts → ArangoDB posts collection (Layer 1).
+    dlt_voz_posts: Nothing,
+) -> MaterializeResult:
+    """Sync raw.voz__posts → ArangoDB posts collection.
 
     on_duplicate=replace resets all Layer 2 enrichment fields to null
     whenever content changes, propagating staleness downstream.
@@ -66,21 +109,14 @@ def _sync_posts_op(
     context.log.info(f"[sync_posts] partition={partition_key!r} page_url={page_url}")
 
     rows = postgres.get_repository().fetch_posts(page_url)
-
     if not rows:
         context.log.warning(f"[sync_posts] no posts for page_url={page_url!r}")
-        return Output(
-            value={
-                "partition_key": partition_key,
-                "page_url": page_url,
-                "upserted": 0,
-                "skipped": 0,
-            },
+        return MaterializeResult(
             metadata={
                 "posts_in_postgres": MetadataValue.int(0),
                 "posts_upserted": MetadataValue.int(0),
                 "posts_skipped_unchanged": MetadataValue.int(0),
-            },
+            }
         )
 
     arango_repo = arango.get_repository()
@@ -91,36 +127,46 @@ def _sync_posts_op(
     arango_repo.upsert_posts(to_upsert)
 
     context.log.info(f"[sync_posts] upserted={len(to_upsert)} skipped={skipped}")
-    return Output(
-        value={
-            "partition_key": partition_key,
-            "page_url": page_url,
-            "upserted": len(to_upsert),
-            "skipped": skipped,
-        },
+    return MaterializeResult(
         metadata={
             "posts_in_postgres": MetadataValue.int(len(rows)),
             "posts_upserted": MetadataValue.int(len(to_upsert)),
             "posts_skipped_unchanged": MetadataValue.int(skipped),
-        },
+        }
     )
 
 
-@op
-def _extract_edges_op(
-    context: OpExecutionContext,
-    sync_result: dict,
+# ═══════════════════════════════════════════════════════════════════════════════
+# Branch A — extract_explicit_edges (fast, stateless, no LLM)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@asset(
+    partitions_def=voz_pages_partitions,
+    group_name="reply_graph",
+    compute_kind="ArangoDB",
+    ins={
+        "sync_posts_to_arango": AssetIn(
+            key=AssetKey(["sync_posts_to_arango"]),
+            partition_mapping=IdentityPartitionMapping(),
+        )
+    },
+    automation_condition=AutomationCondition.eager(),
+    description="XenForo quote edges extracted from raw HTML blockquotes.",
+)
+def extract_explicit_edges(
+    context: AssetExecutionContext,
     postgres: PostgresResource,
     arango: ArangoDBResource,
     crawler: CrawlerResource,
-) -> Output[dict]:
-    """Extract XenForo quote edges into the quotes edge collection.
+    sync_posts_to_arango: Nothing,
+) -> MaterializeResult:
+    """Extract XenForo blockquote edges into the quotes edge collection.
 
-    Depends on sync_result to guarantee posts are written before edges are built.
-    Always drops + re-inserts all html_metadata edges for this partition.
+    Drops all existing html_metadata edges for the partition and re-inserts fresh ones.
     """
-    partition_key = sync_result["partition_key"]
-    page_url = sync_result["page_url"]
+    partition_key = context.partition_key
+    page_url = _page_url(partition_key, crawler.thread_url)
 
     context.log.info(f"[extract_edges] partition={partition_key!r}")
 
@@ -133,185 +179,176 @@ def _extract_edges_op(
     context.log.info(
         f"[extract_edges] dropped={dropped} inserted={len(edges)} from {len(rows)} posts"
     )
-    return Output(
-        value={"partition_key": partition_key, "edges_inserted": len(edges)},
+    return MaterializeResult(
         metadata={
             "posts_with_quotes": MetadataValue.int(len(rows)),
             "edges_dropped": MetadataValue.int(dropped),
             "edges_inserted": MetadataValue.int(len(edges)),
-        },
+        }
     )
 
 
-@op
-def _normalize_op(
+# ═══════════════════════════════════════════════════════════════════════════════
+# Branch B — reply_graph_preprocess_assets (normalize → embed → write once)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@op(ins={"sync_posts_to_arango": In(Nothing)})
+def _fetch_preprocess_op(
     context: OpExecutionContext,
-    sync_result: dict,
     postgres: PostgresResource,
     arango: ArangoDBResource,
     crawler: CrawlerResource,
-) -> Output[dict]:
-    """Strip quoted blocks from post HTML, persist normalized_own_text."""
-    partition_key = sync_result["partition_key"]
-    page_url = sync_result["page_url"]
+    sync_posts_to_arango,
+) -> Output[list]:
+    """Single DB read: staleness check (ArangoDB) + HTML fetch (PostgreSQL).
 
-    context.log.info(f"[normalize] partition={partition_key!r}")
+    Returns filtered RawPost rows for posts that need normalization or re-embedding.
+    """
+    partition_key = context.partition_key
+    page_url = _page_url(partition_key, crawler.thread_url)
 
     arango_repo = arango.get_repository()
-    needing = arango_repo.fetch_posts_needing_normalization(partition_key)
-    context.log.info(f"[normalize] {len(needing)} posts need normalization")
-
-    if not needing:
-        return Output(
-            value={"partition_key": partition_key, "normalized": 0},
-            metadata={"posts_normalized": MetadataValue.int(0)},
+    needing_keys = set(
+        arango_repo.fetch_posts_needing_preprocess(
+            partition_key, NORMALIZATION_VERSION, EMBEDDING_MODEL
         )
+    )
+    context.log.info(f"[fetch_preprocess] {len(needing_keys)} posts need preprocess")
 
-    needing_keys = {p["key"] for p in needing}
+    if not needing_keys:
+        return Output(value=[], metadata={"posts_to_process": MetadataValue.int(0)})
+
     rows = postgres.get_repository().fetch_posts_with_html(page_url)
+    filtered = [r for r in rows if str(r.post_id_on_site) in needing_keys]
+    context.log.info(f"[fetch_preprocess] fetched {len(filtered)} rows from PG")
+    return Output(
+        value=filtered,
+        metadata={"posts_to_process": MetadataValue.int(len(filtered))},
+    )
+
+
+@op(out={"data": Out(), "stats": Out(dict)})
+def _normalize_op(
+    context: OpExecutionContext,
+    rows: list,
+) -> dict:
+    """Pure: strip quoted blocks, populate normalized_own_text. No DB access."""
+    partition_key = context.partition_key
+
+    if not rows:
+        return {
+            "data": [],
+            "stats": {"partition_key": partition_key, "normalized": 0},
+        }
 
     patches: list[NormalizedPostDoc] = []
     for row in rows:
-        key = str(row.post_id_on_site)
-        if key not in needing_keys:
-            continue
         normalized = normalize_post_html(row.raw_content_html or "")
         patches.append(
             NormalizedPostDoc(
-                key=key,
+                key=str(row.post_id_on_site),
                 normalized_own_text=normalized["own_text"] or None,
                 normalized_quoted_blocks=normalized["quoted_blocks"] or None,
                 normalization_version=NORMALIZATION_VERSION,
             )
         )
 
-    arango_repo.update_post_normalizations(patches)
-    context.log.info(f"[normalize] patched={len(patches)}")
-    return Output(
-        value={"partition_key": partition_key, "normalized": len(patches)},
-        metadata={
-            "posts_normalized": MetadataValue.int(len(patches)),
-            "normalization_version": MetadataValue.int(NORMALIZATION_VERSION),
+    context.log.info(f"[normalize] produced {len(patches)} patches")
+    return {
+        "data": patches,
+        "stats": {
+            "partition_key": partition_key,
+            "normalized": len(patches),
+            "normalization_version": NORMALIZATION_VERSION,
         },
-    )
+    }
 
 
-@op
+@op(out={"data": Out(), "stats": Out(dict)})
 def _embed_op(
     context: OpExecutionContext,
-    normalize_result: dict,
-    arango: ArangoDBResource,
+    patches: list,
     openai: OpenAIResource,
-) -> Output[dict]:
-    """Embed normalized_own_text for posts missing embeddings."""
-    partition_key = normalize_result["partition_key"]
-    context.log.info(f"[embed] partition={partition_key!r}")
+) -> dict:
+    """Pure: compute OpenAI embeddings for normalized_own_text. No DB access."""
+    partition_key = context.partition_key
 
-    arango_repo = arango.get_repository()
-    to_embed = arango_repo.fetch_posts_needing_embedding(partition_key)
-    context.log.info(f"[embed] {len(to_embed)} posts need embedding")
+    if not patches:
+        return {
+            "data": [],
+            "stats": {"partition_key": partition_key, "embedded": 0},
+        }
 
-    if not to_embed:
-        return Output(
-            value={"partition_key": partition_key, "embedded": 0},
-            metadata={"posts_embedded": MetadataValue.int(0)},
-        )
+    to_embed = [
+        EmbedItem(key=p.key, text=p.normalized_own_text)
+        for p in patches
+        if p.normalized_own_text and len(p.normalized_own_text) >= 20
+    ]
+    context.log.info(f"[embed] {len(to_embed)} of {len(patches)} posts eligible for embedding")
 
-    with openai.get_client(context) as client:
-        total = embed_and_update(arango_repo, client, to_embed)
+    embed_lookup: dict[str, list[float]] = {}
+    if to_embed:
+        with openai.get_client(context) as client:
+            embed_patches = embed_batch(client, to_embed)
+        embed_lookup = {ep.key: ep.embedding for ep in embed_patches}
 
-    context.log.info(f"[embed] embedded={total}")
-    return Output(
-        value={"partition_key": partition_key, "embedded": total},
-        metadata={
-            "posts_embedded": MetadataValue.int(total),
-            "model": MetadataValue.text(EMBEDDING_MODEL),
-            "batch_size": MetadataValue.int(EMBED_BATCH_SIZE),
+    result: list[NormalizedPostDoc] = []
+    for p in patches:
+        if p.key in embed_lookup:
+            result.append(
+                NormalizedPostDoc(
+                    key=p.key,
+                    normalized_own_text=p.normalized_own_text,
+                    normalized_quoted_blocks=p.normalized_quoted_blocks,
+                    normalization_version=p.normalization_version,
+                    embedding=embed_lookup[p.key],
+                    embedding_model=EMBEDDING_MODEL,
+                )
+            )
+        else:
+            result.append(p)
+
+    context.log.info(f"[embed] embedded={len(embed_lookup)}")
+    return {
+        "data": result,
+        "stats": {
+            "partition_key": partition_key,
+            "embedded": len(embed_lookup),
+            "model": EMBEDDING_MODEL,
         },
-    )
-
-
-@op(tags={"dagster/concurrency_key": "voz_llm"})
-def _classify_op(
-    context: OpExecutionContext,
-    embed_result: dict,
-    arango: ArangoDBResource,
-    openai: OpenAIResource,
-) -> Output[dict]:
-    """LLM enrichment: classify posts + extract company mentions via PydanticAI."""
-    partition_key = embed_result["partition_key"]
-    context.log.info(f"[classify] partition={partition_key!r}")
-
-    arango_repo = arango.get_repository()
-    with openai.get_client(context):
-        stats = enrich_partition(arango_repo, openai.api_key, partition_key)
-
-    context.log.info(f"[classify] enriched={stats.enriched} errors={stats.errors}")
-    if stats.error_keys:
-        context.log.warning(f"[classify] failed keys: {stats.error_keys[:10]}")
-
-    return Output(
-        value={"partition_key": partition_key, "enriched": stats.enriched},
-        metadata={
-            "posts_classified": MetadataValue.int(stats.enriched),
-            "errors": MetadataValue.int(stats.errors),
-            "llm_request_tokens": MetadataValue.int(stats.request_tokens),
-            "llm_response_tokens": MetadataValue.int(stats.response_tokens),
-            "enrichment_version": MetadataValue.int(ENRICHMENT_VERSION),
-        },
-    )
+    }
 
 
 @op
-def _extract_mentions_op(
+def _write_preprocess_op(
     context: OpExecutionContext,
-    classify_result: dict,
+    patches: list,
     arango: ArangoDBResource,
 ) -> Output[dict]:
-    """Project company mentions from ExtractionResultDoc into graph collections."""
-    partition_key = classify_result["partition_key"]
-    context.log.info(f"[extract_mentions] partition={partition_key!r}")
+    """Single bulk write: normalization + embedding fields in one update_many."""
+    partition_key = context.partition_key
 
-    arango_repo = arango.get_repository()
-    extraction_results = arango_repo.fetch_extraction_results(partition_key, ENRICHMENT_VERSION)
+    if not patches:
+        return Output(
+            value={"partition_key": partition_key, "written": 0},
+            metadata={"posts_written": MetadataValue.int(0)},
+        )
 
-    mention_docs, mention_edges, alias_evidence = build_company_mention_docs(
-        extraction_results, partition_key
-    )
-
-    dropped = arango_repo.drop_mention_edges(partition_key)
-    arango_repo.upsert_company_mentions(mention_docs)
-    arango_repo.insert_mention_edges(mention_edges)
-    arango_repo.upsert_alias_evidence(alias_evidence)
-
-    context.log.info(
-        f"[extract_mentions] docs={len(mention_docs)} dropped={dropped}"
-        f" alias_evidence={len(alias_evidence)}"
-    )
+    arango.get_repository().upsert_normalized_embedded(patches)
+    context.log.info(f"[write_preprocess] wrote {len(patches)} posts")
     return Output(
-        value={"partition_key": partition_key},
+        value={"partition_key": partition_key, "written": len(patches)},
         metadata={
-            "mention_docs_upserted": MetadataValue.int(len(mention_docs)),
-            "mention_edges_dropped": MetadataValue.int(dropped),
-            "mention_edges_inserted": MetadataValue.int(len(mention_edges)),
-            "alias_evidence_docs": MetadataValue.int(len(alias_evidence)),
+            "posts_written": MetadataValue.int(len(patches)),
+            "normalization_version": MetadataValue.int(NORMALIZATION_VERSION),
+            "embedding_model": MetadataValue.text(EMBEDDING_MODEL),
         },
     )
-
-
-# ── Graph-backed multi-asset ─────────────────────────────────────────────────
 
 
 @graph_multi_asset(
     outs={
-        "sync_posts_to_arango": AssetOut(
-            group_name="reply_graph",
-            description="Layer 1 posts in ArangoDB, content-hash diffed from PostgreSQL.",
-        ),
-        "extract_explicit_edges": AssetOut(
-            group_name="reply_graph",
-            description="XenForo quote edges extracted from raw HTML.",
-        ),
         "normalize_posts": AssetOut(
             group_name="reply_graph",
             description="Posts with quoted blocks stripped; normalized_own_text populated.",
@@ -320,6 +357,203 @@ def _extract_mentions_op(
             group_name="reply_graph",
             description="OpenAI text-embedding-3-small embeddings for normalized_own_text.",
         ),
+    },
+    ins={
+        "sync_posts_to_arango": AssetIn(
+            key=AssetKey(["sync_posts_to_arango"]),
+            partition_mapping=IdentityPartitionMapping(),
+        )
+    },
+    partitions_def=voz_pages_partitions,
+)
+def reply_graph_preprocess_assets(sync_posts_to_arango: Nothing):
+    """In-memory chain: fetch → normalize → embed → write once.
+
+    Single DB read at _fetch_preprocess_op (staleness check + PG fetch).
+    Single DB write at _write_preprocess_op (one update_many for all fields).
+    All intermediate ops are pure transforms with no DB access.
+    """
+    rows = _fetch_preprocess_op(sync_posts_to_arango=sync_posts_to_arango)
+    norm = _normalize_op(rows)
+    emb = _embed_op(norm.data)
+    written = _write_preprocess_op(emb.data)
+    return {
+        "normalize_posts": norm.stats,
+        "compute_embeddings": written,
+    }
+
+
+reply_graph_preprocess_assets = reply_graph_preprocess_assets.with_attributes(
+    automation_condition=AutomationCondition.eager()
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Branch B continued — reply_graph_llm_assets (fetch → classify → mentions → write once)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@op(ins={"compute_embeddings": In(Nothing)})
+def _fetch_llm_op(
+    context: OpExecutionContext,
+    arango: ArangoDBResource,
+    compute_embeddings,
+) -> Output[list]:
+    """Single DB read: fetch posts needing LLM enrichment (staleness check)."""
+    partition_key = context.partition_key
+
+    items = arango.get_repository().fetch_posts_needing_enrichment(
+        partition_key, ENRICHMENT_VERSION
+    )
+    context.log.info(f"[fetch_llm] {len(items)} posts need enrichment")
+    return Output(
+        value=items,
+        metadata={"posts_to_enrich": MetadataValue.int(len(items))},
+    )
+
+
+@op(
+    out={"data": Out(), "stats": Out(dict)},
+    tags={"dagster/concurrency_key": "voz_llm"},
+)
+def _classify_op(
+    context: OpExecutionContext,
+    items: list,
+    openai: OpenAIResource,
+) -> dict:
+    """Pure LLM: classify posts + extract company mentions via PydanticAI. No DB access."""
+    partition_key = context.partition_key
+
+    if not items:
+        return {
+            "data": _ClassifyBundle(
+                partition_key=partition_key,
+                extraction_docs=[],
+                enrichment_patches=[],
+                stats=EnrichmentStats(),
+            ),
+            "stats": {"partition_key": partition_key, "enriched": 0, "errors": 0},
+        }
+
+    extraction_docs, enrichment_patches, stats = run_llm_enrichment(
+        items, openai.api_key, partition_key
+    )
+
+    context.log.info(f"[classify] enriched={stats.enriched} errors={stats.errors}")
+    if stats.error_keys:
+        context.log.warning(f"[classify] failed keys: {stats.error_keys[:10]}")
+
+    return {
+        "data": _ClassifyBundle(
+            partition_key=partition_key,
+            extraction_docs=extraction_docs,
+            enrichment_patches=enrichment_patches,
+            stats=stats,
+        ),
+        "stats": {
+            "partition_key": partition_key,
+            "enriched": stats.enriched,
+            "errors": stats.errors,
+            "llm_request_tokens": stats.request_tokens,
+            "llm_response_tokens": stats.response_tokens,
+            "enrichment_version": ENRICHMENT_VERSION,
+        },
+    }
+
+
+@op(out={"data": Out(), "stats": Out(dict)})
+def _build_mentions_op(
+    context: OpExecutionContext,
+    bundle: _ClassifyBundle,
+) -> dict:
+    """Pure: project company mentions from extraction results. No DB access."""
+    partition_key = context.partition_key
+
+    if not bundle.extraction_docs:
+        return {
+            "data": _LLMBundle(
+                partition_key=partition_key,
+                extraction_docs=[],
+                enrichment_patches=[],
+                mention_docs=[],
+                mention_edges=[],
+                alias_evidence=[],
+                stats=bundle.stats,
+            ),
+            "stats": {
+                "partition_key": partition_key,
+                "mention_docs": 0,
+                "alias_evidence": 0,
+            },
+        }
+
+    mention_docs, mention_edges, alias_evidence = build_company_mention_docs(
+        bundle.extraction_docs, partition_key
+    )
+
+    context.log.info(
+        f"[build_mentions] docs={len(mention_docs)} alias_evidence={len(alias_evidence)}"
+    )
+    return {
+        "data": _LLMBundle(
+            partition_key=partition_key,
+            extraction_docs=bundle.extraction_docs,
+            enrichment_patches=bundle.enrichment_patches,
+            mention_docs=mention_docs,
+            mention_edges=mention_edges,
+            alias_evidence=alias_evidence,
+            stats=bundle.stats,
+        ),
+        "stats": {
+            "partition_key": partition_key,
+            "mention_docs": len(mention_docs),
+            "alias_evidence": len(alias_evidence),
+        },
+    }
+
+
+@op
+def _write_llm_op(
+    context: OpExecutionContext,
+    bundle: _LLMBundle,
+    arango: ArangoDBResource,
+) -> Output[dict]:
+    """Single write boundary: all LLM-derived data in one repo call."""
+    partition_key = context.partition_key
+
+    if not bundle.extraction_docs:
+        return Output(
+            value={"partition_key": partition_key, "written": 0},
+            metadata={"extraction_docs_written": MetadataValue.int(0)},
+        )
+
+    written = arango.get_repository().write_llm_results(
+        partition_key=partition_key,
+        extraction_docs=bundle.extraction_docs,
+        enrichment_patches=bundle.enrichment_patches,
+        mention_docs=bundle.mention_docs,
+        mention_edges=bundle.mention_edges,
+        alias_evidence=bundle.alias_evidence,
+    )
+
+    context.log.info(
+        f"[write_llm] extraction_docs={written}"
+        f" mentions={len(bundle.mention_docs)}"
+        f" alias_evidence={len(bundle.alias_evidence)}"
+    )
+    return Output(
+        value={"partition_key": partition_key, "written": written},
+        metadata={
+            "extraction_docs_written": MetadataValue.int(written),
+            "mention_docs_upserted": MetadataValue.int(len(bundle.mention_docs)),
+            "mention_edges_inserted": MetadataValue.int(len(bundle.mention_edges)),
+            "alias_evidence_docs": MetadataValue.int(len(bundle.alias_evidence)),
+        },
+    )
+
+
+@graph_multi_asset(
+    outs={
         "classify_posts": AssetOut(
             group_name="reply_graph",
             description="LLM-classified posts with content_class and company_mentions.",
@@ -330,56 +564,46 @@ def _extract_mentions_op(
         ),
     },
     ins={
-        "dlt_voz_posts": AssetIn(
-            key=AssetKey(["dlt_voz_posts"]),
+        "compute_embeddings": AssetIn(
+            key=AssetKey(["compute_embeddings"]),
             partition_mapping=IdentityPartitionMapping(),
         )
     },
     partitions_def=voz_pages_partitions,
 )
-def reply_graph_assets(dlt_voz_posts: Nothing):
-    """Full per-partition enrichment pipeline.
+def reply_graph_llm_assets(compute_embeddings: Nothing):
+    """In-memory chain: fetch → classify → build_mentions → write once.
 
-    sync → (edges + normalize) → embed → classify → mentions.
-
-
-    dlt_voz_posts is a Nothing input — ordering-only dependency on the upstream dlt crawl asset.
-    extract_explicit_edges and normalize_posts fan out in parallel after sync_posts_to_arango.
-    The classify op is tagged voz_llm to bound concurrent LLM partition execution to 1.
-    detect_implicit_replies is a separate sensor-gated asset (cross-partition lookback).
+    Depends on compute_embeddings (not sync_posts_to_arango) — the LLM group
+    only needs posts with embeddings ready; it has no direct dependency on the sync step.
+    Single DB read at _fetch_llm_op (staleness check).
+    Single DB write at _write_llm_op (extraction_results + post patches + mentions).
     """
-    sync = _sync_posts_op(dlt_voz_posts=dlt_voz_posts)
-    edges = _extract_edges_op(sync)
-    normalized = _normalize_op(sync)
-    embedded = _embed_op(normalized)
-    classified = _classify_op(embedded)
-    mentions = _extract_mentions_op(classified)
+    items = _fetch_llm_op(compute_embeddings=compute_embeddings)
+    classified = _classify_op(items)
+    mentions = _build_mentions_op(classified.data)
+    written = _write_llm_op(mentions.data)
     return {
-        "sync_posts_to_arango": sync,
-        "extract_explicit_edges": edges,
-        "normalize_posts": normalized,
-        "compute_embeddings": embedded,
-        "classify_posts": classified,
-        "extract_company_mentions": mentions,
+        "classify_posts": classified.stats,
+        "extract_company_mentions": written,
     }
 
 
-# Apply AutomationCondition.eager() to all 6 asset outputs in the graph.
-# graph_multi_asset does not accept automation_condition directly, so we
-# use with_attributes post-hoc to set the same condition on every key.
-reply_graph_assets = reply_graph_assets.with_attributes(
+reply_graph_llm_assets = reply_graph_llm_assets.with_attributes(
     automation_condition=AutomationCondition.eager()
 )
 
 
-# ── detect_implicit_replies — sensor-gated, NOT part of the graph ────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# detect_implicit_replies — sensor-gated, cross-partition lookback
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 @asset(
     partitions_def=voz_pages_partitions,
     group_name="reply_graph",
     compute_kind="OpenAI",
-    deps=[AssetDep("classify_posts", partition_mapping=IdentityPartitionMapping())],
+    deps=[AssetDep("extract_company_mentions", partition_mapping=IdentityPartitionMapping())],
     # No AutomationCondition.eager() — triggered by implicit_reply_sensor only.
     # implicit_reply_sensor gates execution until all lower-numbered partitions
     # have materialized extract_company_mentions (cross-partition lookback window).

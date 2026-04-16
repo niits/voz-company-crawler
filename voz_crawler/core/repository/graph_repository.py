@@ -33,8 +33,14 @@ class GraphRepository:
         Safe to call on every asset run — all operations are no-ops if already present.
         """
         # ── Vertex collections ───────────────────────────────────────────────
-        for name in ("posts", "extraction_results", "company_mentions",
-                     "companies", "company_aliases", "alias_evidence"):
+        for name in (
+            "posts",
+            "extraction_results",
+            "company_mentions",
+            "companies",
+            "company_aliases",
+            "alias_evidence",
+        ):
             if not self._db.has_collection(name):
                 self._db.create_collection(name)
 
@@ -72,12 +78,8 @@ class GraphRepository:
                 )
 
         # ── Indexes ──────────────────────────────────────────────────────────
-        self._db.collection("posts").add_persistent_index(
-            fields=["partition_key"], unique=False
-        )
-        self._db.collection("quotes").add_persistent_index(
-            fields=["partition_key"], unique=False
-        )
+        self._db.collection("posts").add_persistent_index(fields=["partition_key"], unique=False)
+        self._db.collection("quotes").add_persistent_index(fields=["partition_key"], unique=False)
         self._db.collection("extraction_results").add_persistent_index(
             fields=["post_key", "enrichment_version"], unique=False
         )
@@ -93,12 +95,8 @@ class GraphRepository:
         self._db.collection("company_mentions").add_persistent_index(
             fields=["resolution_version"], unique=False
         )
-        self._db.collection("mentions").add_persistent_index(
-            fields=["partition_key"], unique=False
-        )
-        self._db.collection("companies").add_persistent_index(
-            fields=["is_stub"], unique=False
-        )
+        self._db.collection("mentions").add_persistent_index(fields=["partition_key"], unique=False)
+        self._db.collection("companies").add_persistent_index(fields=["is_stub"], unique=False)
         self._db.collection("company_aliases").add_persistent_index(
             fields=["alias_normalized"], unique=False
         )
@@ -155,6 +153,88 @@ class GraphRepository:
 
     # ── Posts — Layer 2 normalization ────────────────────────────────────────
 
+    def fetch_posts_needing_preprocess(
+        self, partition_key: str, normalization_version: int, embedding_model: str
+    ) -> list[str]:
+        """Return _keys of posts needing normalization or re-embedding.
+
+        A post needs preprocess if:
+        - normalization_version is null or stale, OR
+        - normalization is current but embedding is missing or from a different model.
+        """
+        cursor = self._db.aql.execute(
+            "FOR p IN posts"
+            " FILTER p.partition_key == @pk"
+            "   AND ("
+            "     p.normalization_version == null"
+            "     OR p.normalization_version < @norm_ver"
+            "     OR ("
+            "       p.normalized_own_text != null"
+            "       AND LENGTH(p.normalized_own_text) >= 20"
+            "       AND (p.embedding == null OR p.embedding_model != @embed_model)"
+            "     )"
+            "   )"
+            " RETURN p._key",
+            bind_vars={
+                "pk": partition_key,
+                "norm_ver": normalization_version,
+                "embed_model": embedding_model,
+            },
+        )
+        return list(cursor)
+
+    def upsert_normalized_embedded(self, patches: list[NormalizedPostDoc]) -> None:
+        """Single bulk write for normalization + embedding fields together."""
+        if patches:
+            self._db.collection("posts").update_many(
+                [p.model_dump(by_alias=True, exclude_none=True) for p in patches]
+            )
+
+    def write_llm_results(
+        self,
+        partition_key: str,
+        extraction_docs: list[ExtractionResultDoc],
+        enrichment_patches: list[NormalizedPostDoc],
+        mention_docs,
+        mention_edges,
+        alias_evidence,
+    ) -> int:
+        """Single write boundary for all LLM-derived data.
+
+        Writes in dependency order: extraction_results → post patches →
+        drop old mention edges → company_mentions → mention_edges → alias_evidence.
+        Returns count of extraction docs written.
+        """
+        if extraction_docs:
+            self._db.collection("extraction_results").import_bulk(
+                [d.model_dump(by_alias=True) for d in extraction_docs],
+                on_duplicate="replace",
+            )
+        if enrichment_patches:
+            self._db.collection("posts").update_many(
+                [p.model_dump(by_alias=True, exclude_none=True) for p in enrichment_patches]
+            )
+        self._db.aql.execute(
+            "FOR e IN mentions FILTER e.partition_key == @pk REMOVE e IN mentions",
+            bind_vars={"pk": partition_key},
+        )
+        if mention_docs:
+            self._db.collection("company_mentions").import_bulk(
+                [d.model_dump(by_alias=True) for d in mention_docs],
+                on_duplicate="replace",
+            )
+        if mention_edges:
+            self._db.collection("mentions").import_bulk(
+                [e.model_dump(by_alias=True) for e in mention_edges],
+                on_duplicate="ignore",
+            )
+        if alias_evidence:
+            self._db.collection("alias_evidence").import_bulk(
+                [d.model_dump(by_alias=True) for d in alias_evidence],
+                on_duplicate="replace",
+            )
+        return len(extraction_docs)
+
     def fetch_posts_needing_normalization(self, partition_key: str) -> list[dict]:
         """Return {key, html} for posts missing normalized_own_text in this partition."""
         cursor = self._db.aql.execute(
@@ -191,9 +271,7 @@ class GraphRepository:
     def update_post_embeddings(self, patches: list[EmbedPatch]) -> None:
         """Patch embedding fields on existing post documents."""
         if patches:
-            self._db.collection("posts").update_many(
-                [p.model_dump(by_alias=True) for p in patches]
-            )
+            self._db.collection("posts").update_many([p.model_dump(by_alias=True) for p in patches])
 
     # ── Posts — Layer 2 enrichment projection ────────────────────────────────
 
@@ -229,9 +307,7 @@ class GraphRepository:
                 on_duplicate="replace",
             )
 
-    def fetch_extraction_results(
-        self, partition_key: str, enrichment_version: int
-    ) -> list[dict]:
+    def fetch_extraction_results(self, partition_key: str, enrichment_version: int) -> list[dict]:
         """Return raw extraction result docs for a partition at the current version."""
         cursor = self._db.aql.execute(
             "FOR e IN extraction_results"
