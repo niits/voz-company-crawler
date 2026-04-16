@@ -603,7 +603,12 @@ reply_graph_llm_assets = reply_graph_llm_assets.with_attributes(
     partitions_def=voz_pages_partitions,
     group_name="reply_graph",
     compute_kind="OpenAI",
-    deps=[AssetDep("extract_company_mentions", partition_mapping=IdentityPartitionMapping())],
+    deps=[
+        AssetDep("extract_company_mentions", partition_mapping=IdentityPartitionMapping()),
+        # extract_explicit_edges must be written before implicit detection runs so that
+        # fetch_implicit_reply_candidates can exclude already-linked posts via reply_graph.
+        AssetDep("extract_explicit_edges", partition_mapping=IdentityPartitionMapping()),
+    ],
     # No AutomationCondition.eager() — triggered by implicit_reply_sensor only.
     # implicit_reply_sensor gates execution until all lower-numbered partitions
     # have materialized extract_company_mentions (cross-partition lookback window).

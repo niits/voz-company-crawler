@@ -79,6 +79,7 @@ uv run dagster dev                               # Dagit UI :3000
 uv run ruff check . && uv run ruff format .   # lint + format
 uv run pytest                                  # tests
 uv add <package>                               # add dependency
+uv run python scripts/clean_arango.py         # drop + recreate ArangoDB database (clean run)
 ```
 
 ## Database Schema
@@ -137,9 +138,13 @@ Five assets in the `reply_graph` group run after each successful crawl partition
 ```
 sync_posts_to_arango
     ├── extract_explicit_edges          (parallel branch A — fast, stateless)
-    └── reply_graph_preprocess_assets   (parallel branch B)
-            └── reply_graph_llm_assets
-                    └── detect_implicit_replies  (sensor-gated only)
+    │       │
+    └───────┤   reply_graph_preprocess_assets   (parallel branch B)
+            │           └── reply_graph_llm_assets
+            │                   │
+            └───────────────────┘
+                    ▼
+            detect_implicit_replies  (sensor-gated; deps: extract_company_mentions + extract_explicit_edges)
 ```
 
 ### Asset descriptions
@@ -152,7 +157,7 @@ sync_posts_to_arango
 
 **`reply_graph_llm_assets`** `[@graph_multi_asset → classify_posts, extract_company_mentions]` — in-memory chain: one DB read (staleness check) → LLM classification + mention extraction → one bulk write. Depends on `compute_embeddings` (not `sync_posts_to_arango`). Staleness: no `ExtractionResultDoc` with `enrichment_version == ENRICHMENT_VERSION`.
 
-**`detect_implicit_replies`** `[@asset]` — BM25 + cosine re-rank + PydanticAI agent to detect implicit reply edges. No `AutomationCondition.eager()` — triggered by `implicit_reply_sensor` only after all lower-numbered partitions have materialized `extract_company_mentions`.
+**`detect_implicit_replies`** `[@asset]` — BM25 + cosine re-rank + PydanticAI agent to detect implicit reply edges. No `AutomationCondition.eager()` — triggered by `implicit_reply_sensor` only after all lower-numbered partitions have materialized `extract_company_mentions`. Depends on both `extract_company_mentions` AND `extract_explicit_edges` (explicit edges must exist in `reply_graph` before implicit detection runs, so the `already_linked` exclusion is correct). Uses noise-aware adaptive window (`content_class == "noise"` posts don't consume window slots) and passes `content_class` labels to the LLM for each candidate.
 
 ### AutomationCondition
 
@@ -202,6 +207,21 @@ Brainstorm notes live in `docs/brainstorm/`. When creating a new brainstorm file
 
 Content starts here...
 ```
+
+## Docs-First Workflow
+
+Before writing any code for a non-trivial change, update the relevant documentation first:
+
+1. **`docs/design-decisions.md`** — add or update the decision that motivates the change. Include: what was decided, why, trade-offs considered, and any alternatives rejected. If an existing decision's diagram or rationale becomes stale, fix it in the same commit.
+
+2. **`CLAUDE.md`** — update the project layout, asset descriptions, or running instructions if the change affects them.
+
+**Why docs first:**
+- Forces explicit reasoning about the design before implementation details obscure it.
+- Surfaces inconsistencies early — a diagram that can't be updated cleanly is a signal the design has a problem.
+- Future agents (and humans) read `CLAUDE.md` and `design-decisions.md` as the canonical source of truth. Code without matching docs creates drift that compounds over time.
+
+**What counts as non-trivial:** new assets, new data flows, changes to staleness logic, new external dependencies, changes to partition/sensor behavior. Bug fixes and one-line patches do not require a doc update unless they correct a documented behavior.
 
 ## Design Decisions
 
