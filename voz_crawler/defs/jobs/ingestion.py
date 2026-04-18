@@ -1,24 +1,27 @@
-from dagster import AssetSelection, define_asset_job, job
-
-from voz_crawler.defs.assets.ingestion import (
-    voz_pages_partitions,
-)
-from voz_crawler.defs.ops.ingestion import discover_pages_op
-
-crawl_page_job = define_asset_job(
-    name="crawl_page_job",
-    selection=AssetSelection.groups("voz"),
-    partitions_def=voz_pages_partitions,
-    description="Crawl one Voz.vn thread page partition and load posts to PostgreSQL.",
-    tags={"dagster/concurrency_key": "voz_crawl"},
-)
+from dagster import AssetKey, AssetSelection, DynamicPartitionsDefinition, define_asset_job, job
 
 
-@job(
-    description=(
-        "Discover new Voz thread pages and register them as partitions. "
-        "Run manually or before the first crawl."
+def build_ingestion_jobs(
+    thread_id: str,
+    partitions_def: DynamicPartitionsDefinition,
+    posts_asset_key: AssetKey,
+    discover_op,
+):
+    """Returns (crawl_page_job, discover_pages_job) scoped to a single thread."""
+
+    @job(
+        name=f"discover_pages_job_{thread_id}",
+        description=f"Discover new pages for thread {thread_id} and register as partitions.",
     )
-)
-def discover_pages_job():
-    discover_pages_op()
+    def discover_pages_job():
+        discover_op()
+
+    crawl_page_job = define_asset_job(
+        name=f"crawl_page_job_{thread_id}",
+        selection=AssetSelection.assets(posts_asset_key),
+        partitions_def=partitions_def,
+        description=f"Crawl one page partition for thread {thread_id} and load to PostgreSQL.",
+        tags={"dagster/concurrency_key": "voz_crawl"},
+    )
+
+    return crawl_page_job, discover_pages_job

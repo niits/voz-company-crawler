@@ -27,7 +27,8 @@ _SYSTEM_PROMPT = (
     '     (ví dụ: "nhà F", "ép sọt", "cty cá", "big4") — KHÔNG giải thích\n'
     '   - company_name: tên chuẩn hóa (bỏ "công ty", "cty TNHH", "JSC"; viết hoa đúng)\n'
     "   - company_type: it | outsourcing | product | startup | bank | telco | unknown\n"
-    "   - mention_type: positive_review | negative_review | salary_info | layoff | hiring | event | general\n"
+    "   - mention_type: positive_review | negative_review | salary_info"
+    " | layoff | hiring | event | general\n"
     "   - sentiment: positive | negative | neutral\n"
     "   - summary: một câu tóm tắt điều tác giả nói về công ty này\n\n"
     "3. Ghi lại alias definitions nếu tác giả GIẢI THÍCH hoặc ĐỊnh nghĩa một alias:\n"
