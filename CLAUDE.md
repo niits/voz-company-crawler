@@ -42,21 +42,32 @@ voz_crawler/
       graph_repository.py GraphRepository — ArangoDB posts/quotes/reply_graph operations
   defs/
     assets/
-      ingestion.py        @dlt_assets: voz_page_posts_assets (partitioned)
-      reply_graph.py      5 assets: sync_posts_to_arango (@asset),
+      ingestion.py        build_ingestion_assets(thread_id, partitions_def) factory
+                            → per-thread @dlt_assets with key_prefix=[thread_id]
+      reply_graph.py      build_thread_assets(thread_id, partitions_def, posts_asset_key) factory
+                            → 7 assets per thread: sync_posts_to_arango (@asset),
                             extract_explicit_edges (@asset),
-                            reply_graph_preprocess_assets (@graph_multi_asset: normalize_posts + compute_embeddings),
-                            reply_graph_llm_assets (@graph_multi_asset: classify_posts + extract_company_mentions),
+                            normalize_posts (@asset),
+                            compute_embeddings (@asset),
+                            classify_posts (@asset),
+                            extract_company_mentions (@asset, non-noise only),
                             detect_implicit_replies (@asset, sensor-gated)
     jobs/
-      ingestion.py        crawl_page_job + discover_pages_job
-      reply_graph.py      reply_graph_job (all reply_graph assets, partitioned)
-    ops/ingestion.py      discover_pages_op (registers dynamic partitions)
+      ingestion.py        build_ingestion_jobs(thread_id, ...) factory
+                            → discover_pages_job_{thread_id} + crawl_page_job_{thread_id}
+      reply_graph.py      build_thread_jobs(thread_id, ...) factory
+                            → reply_graph_job_{thread_id} + implicit_reply_job_{thread_id}
+    ops/ingestion.py      build_discover_op(thread_id, partitions_def) factory
+                            → discover_pages_op_{thread_id} (registers per-thread partitions)
     resources/
-      crawler_resource.py CrawlerResource (thread_url, flaresolverr_url, timeout)
+      crawler_resource.py CrawlerResource (thread_urls, flaresolverr_url, timeout)
+                            url_for_thread(thread_id), url_for_partition(partition_key)
       postgres_resource.py PostgresResource (assembles SQLAlchemy URL)
       arango_resource.py  ArangoDBResource (connects to ArangoDB, ensures schema)
-    sensors/ingestion.py  voz_discover_sensor + voz_crawl_sensor
+    sensors/ingestion.py  build_ingestion_sensors(thread_id, ...) factory
+                            → voz_discover_sensor_{thread_id} + voz_crawl_sensor_{thread_id}
+    sensors/reply_graph.py build_implicit_sensor(thread_id, ...) factory
+                            → implicit_reply_sensor_{thread_id}
   dlt/
     sources/voz_thread.py dlt source: voz_page_source + FlareSolverr fetch helpers
   definitions.py          Dagster Definitions entry point
@@ -98,19 +109,23 @@ Key table (auto-created by dlt on first run):
 
 ## Crawl Strategy
 
-Two sensors work in tandem:
+Each thread URL has its own isolated pipeline with `DynamicPartitionsDefinition(f"voz_pages_{thread_id}")`. Partition key format: `{thread_id}:{page}` (e.g. `"677450:42"`).
 
-**`voz_discover_sensor`** (every 6 hours) triggers `discover_pages_job`:
-1. Fetches page 1 via FlareSolverr to discover `total_pages`
-2. Registers new page numbers into `DynamicPartitionsDefinition("voz_pages")`
+Per-thread, two sensors work in tandem:
 
-**`voz_crawl_sensor`** (`run_status_sensor`, fires after `discover_pages_job` succeeds):
-1. Checks Dagster's asset catalog for already-materialized partitions
-2. Queues `RunRequest` for each unmaterialized page + the last page (always re-crawled daily)
+**`voz_discover_sensor_{thread_id}`** (every 6 hours) triggers `discover_pages_job_{thread_id}`:
+1. Fetches page 1 of the thread via FlareSolverr to discover `total_pages`
+2. Registers new keys `f"{thread_id}:{p}"` into `DynamicPartitionsDefinition(f"voz_pages_{thread_id}")`
+
+**`voz_crawl_sensor_{thread_id}`** (`run_status_sensor`, fires after `discover_pages_job_{thread_id}` succeeds):
+1. Checks Dagster's asset catalog for already-materialized partitions of `{thread_id}/voz__posts`
+2. Queues `RunRequest` to `crawl_page_job_{thread_id}` for each unmaterialized page + the last page (always re-crawled daily)
 
 Each run materializes one partition → calls `voz_page_source(page_url)` → parses posts → merges into `raw.voz__posts` by `post_id_on_site`. No dlt cursor state needed.
 
 On Cloudflare block (403/429/503), the asset raises `RuntimeError`. Safe — next sensor evaluation retries automatically.
+
+`definitions.py` generates all per-thread definitions via `_build_thread_pipeline(thread_id)` called in a loop over `VOZ_THREAD_URLS`.
 
 ## Environment Variables
 
@@ -131,37 +146,47 @@ On Cloudflare block (403/429/503), the asset raises `RuntimeError`. Safe — nex
 
 ## Reply Graph Pipeline
 
-Five assets in the `reply_graph` group run after each successful crawl partition. They form two parallel branches that fan out from `sync_posts_to_arango`.
+Seven assets per thread (in group `thread_{thread_id}`) run after each successful crawl partition. They form a diamond-shaped DAG: two fast parallel branches (`extract_explicit_edges` and `normalize_posts`) fan out from `sync_posts_to_arango`, then `normalize_posts` fans out again into a parallel embedding + classification pair.
 
 ### Asset execution order
 
 ```
 sync_posts_to_arango
-    ├── extract_explicit_edges          (parallel branch A — fast, stateless)
-    │       │
-    └───────┤   reply_graph_preprocess_assets   (parallel branch B)
-            │           └── reply_graph_llm_assets
-            │                   │
-            └───────────────────┘
-                    ▼
-            detect_implicit_replies  (sensor-gated; deps: extract_company_mentions + extract_explicit_edges)
+    ├── extract_explicit_edges          (branch A — fast, stateless)
+    └── normalize_posts
+            ├── compute_embeddings      (parallel with classify_posts)
+            └── classify_posts          (parallel with compute_embeddings)
+                    └── extract_company_mentions  (non-noise only: review/rating/event)
+                                └── detect_implicit_replies  (sensor-gated)
+                                        ▲
+                                        │ (also deps)
+                                extract_explicit_edges
 ```
 
 ### Asset descriptions
 
 **`sync_posts_to_arango`** `[@asset]` — reads `raw.voz__posts` for the page URL, diffs against existing ArangoDB documents by `content_hash`, upserts only changed/new posts. Changed posts have Layer 2 fields reset to null, propagating staleness to downstream enrichment.
 
-**`extract_explicit_edges`** `[@asset]` — re-parses XenForo `<blockquote>` HTML, drops all existing `quotes` edges for the partition, re-inserts fresh edges. Runs concurrently with the preprocess branch.
+**`extract_explicit_edges`** `[@asset]` — re-parses XenForo `<blockquote>` HTML, drops all existing `quotes` edges for the partition, re-inserts fresh edges. Runs concurrently with `normalize_posts`.
 
-**`reply_graph_preprocess_assets`** `[@graph_multi_asset → normalize_posts, compute_embeddings]` — in-memory chain: one DB read (staleness check + PG fetch) → normalize HTML → embed with OpenAI → one bulk write to ArangoDB. Staleness: `normalization_version < NORMALIZATION_VERSION OR embedding_model != EMBEDDING_MODEL`.
+**`normalize_posts`** `[@asset]` — fetches posts with stale `normalization_version` from ArangoDB, reads raw HTML from PostgreSQL, strips quoted blocks, writes `normalized_own_text` + `normalization_version`. Staleness: `normalization_version < NORMALIZATION_VERSION`.
 
-**`reply_graph_llm_assets`** `[@graph_multi_asset → classify_posts, extract_company_mentions]` — in-memory chain: one DB read (staleness check) → LLM classification + mention extraction → one bulk write. Depends on `compute_embeddings` (not `sync_posts_to_arango`). Staleness: no `ExtractionResultDoc` with `enrichment_version == ENRICHMENT_VERSION`.
+**`compute_embeddings`** `[@asset]` — fetches posts with `normalized_own_text` but missing `embedding`, calls OpenAI `text-embedding-3-small`, writes `embedding` + `embedding_model`. Runs in parallel with `classify_posts` after `normalize_posts`.
 
-**`detect_implicit_replies`** `[@asset]` — BM25 + cosine re-rank + PydanticAI agent to detect implicit reply edges. No `AutomationCondition.eager()` — triggered by `implicit_reply_sensor` only after all lower-numbered partitions have materialized `extract_company_mentions`. Depends on both `extract_company_mentions` AND `extract_explicit_edges` (explicit edges must exist in `reply_graph` before implicit detection runs, so the `already_linked` exclusion is correct). Uses noise-aware adaptive window (`content_class == "noise"` posts don't consume window slots) and passes `content_class` labels to the LLM for each candidate.
+**`classify_posts`** `[@asset]` — fetches posts with stale `enrichment_version`, runs LLM via PydanticAI to classify `content_class` and extract company mentions, writes `ExtractionResultDoc` + enrichment patches (`content_class`, `has_company_mention`, `enrichment_version`). Depends on `normalize_posts` (text), not `compute_embeddings`. Runs in parallel with `compute_embeddings`.
+
+**`extract_company_mentions`** `[@asset]` — reads `ExtractionResultDoc` for the partition, filters to `content_class in {"review", "rating", "event"}`, projects `CompanyMentionDoc` + `MentionEdge` + `AliasEvidenceDoc`, drops and re-inserts mention data. Returns `MaterializeResult` with `mention_docs: 0` metadata if all posts are noise/question (partition shows as materialized, not failed).
+
+**`detect_implicit_replies`** `[@asset]` — BM25 + cosine re-rank + PydanticAI agent to detect implicit reply edges. No `AutomationCondition.eager()` — triggered by `implicit_reply_sensor` only after all lower-numbered partitions have materialized `extract_company_mentions`. Depends on both `extract_company_mentions` AND `extract_explicit_edges` (explicit edges must exist before implicit detection so the `already_linked` exclusion is correct). Uses noise-aware adaptive window and passes `content_class` labels to the LLM for each candidate.
 
 ### AutomationCondition
 
-All assets except `detect_implicit_replies` use `AutomationCondition.eager()` with `IdentityPartitionMapping`. The `.with_attributes()` call is applied post-hoc to `@graph_multi_asset` objects since the decorator does not accept `automation_condition` directly.
+All assets except `detect_implicit_replies` use `AutomationCondition.eager()` with `IdentityPartitionMapping`. The `default_automation_condition_sensor` evaluates these conditions automatically.
+
+### Per-thread job selection
+
+- `reply_graph_job_{thread_id}`: `AssetSelection.groups(f"thread_{thread_id}") - AssetSelection.assets(posts_asset_key) - AssetSelection.assets(implicit_key)` — excludes the ingestion asset and detect_implicit_replies
+- `implicit_reply_job_{thread_id}`: `AssetSelection.assets(implicit_key)` only
 
 ### Version constants (in `core/entities/enrichment.py`)
 
@@ -207,6 +232,28 @@ Brainstorm notes live in `docs/brainstorm/`. When creating a new brainstorm file
 
 Content starts here...
 ```
+
+## Library Version Discipline
+
+Before using any library API (especially Dagster, dlt, pydantic-ai, python-arango), always verify the **exact installed version** and fetch docs for that version:
+
+```bash
+uv run python -c "import <pkg>; print(<pkg>.__version__)"
+```
+
+Then use Context7 MCP with the version-specific library ID to look up the correct API. Never rely on training-data memory for library APIs — constructors, required arguments, and method signatures change between versions. A wrong API call only fails at runtime (when Dagster loads the code location), not at test time, because unit tests don't instantiate `Definitions`.
+
+**Versions to check before touching their APIs:**
+
+| Library | Check command |
+|---|---|
+| `dagster` | `import dagster; dagster.__version__` |
+| `dlt` | `import dlt; dlt.__version__` |
+| `pydantic_ai` | `import pydantic_ai; pydantic_ai.__version__` |
+| `python-arango` | `import arango; arango.__version__` |
+| `openai` | `import openai; openai.__version__` |
+
+---
 
 ## Docs-First Workflow
 
