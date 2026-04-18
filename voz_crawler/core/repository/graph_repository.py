@@ -235,14 +235,17 @@ class GraphRepository:
             )
         return len(extraction_docs)
 
-    def fetch_posts_needing_normalization(self, partition_key: str) -> list[dict]:
-        """Return {key, html} for posts missing normalized_own_text in this partition."""
+    def fetch_posts_needing_normalization(
+        self, partition_key: str, normalization_version: int
+    ) -> list[str]:
+        """Return _keys of posts with stale or missing normalization in this partition."""
         cursor = self._db.aql.execute(
             "FOR p IN posts"
             " FILTER p.partition_key == @pk"
-            "   AND p.normalized_own_text == null"
-            " RETURN {key: p._key}",
-            bind_vars={"pk": partition_key},
+            "   AND (p.normalization_version == null"
+            "     OR p.normalization_version < @norm_ver)"
+            " RETURN p._key",
+            bind_vars={"pk": partition_key, "norm_ver": normalization_version},
         )
         return list(cursor)
 
