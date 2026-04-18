@@ -1,25 +1,37 @@
-from dagster import AssetSelection, define_asset_job
+from dagster import AssetKey, AssetSelection, DynamicPartitionsDefinition, define_asset_job
 
-from voz_crawler.defs.assets.ingestion import voz_pages_partitions
 
-reply_graph_job = define_asset_job(
-    name="reply_graph_job",
-    selection=AssetSelection.groups("reply_graph"),
-    partitions_def=voz_pages_partitions,
-    description=(
-        "Sync posts and extract quote edges to ArangoDB for one thread page partition. "
-        "Triggered by reply_graph_sensor after each successful crawl_page_job."
-    ),
-)
+def build_thread_jobs(
+    thread_id: str,
+    partitions_def: DynamicPartitionsDefinition,
+    posts_asset_key: AssetKey,
+):
+    """Returns (reply_graph_job, implicit_reply_job) scoped to a single thread."""
+    implicit_key = AssetKey([thread_id, "detect_implicit_replies"])
 
-implicit_reply_job = define_asset_job(
-    name="implicit_reply_job",
-    selection=AssetSelection.assets("detect_implicit_replies"),
-    partitions_def=voz_pages_partitions,
-    description=(
-        "Detect implicit reply edges for a single partition. "
-        "Triggered by implicit_reply_sensor once all preceding partitions "
-        "have completed extract_company_mentions."
-    ),
-    tags={"dagster/concurrency_key": "voz_llm"},
-)
+    reply_graph_job = define_asset_job(
+        name=f"reply_graph_job_{thread_id}",
+        selection=(
+            AssetSelection.groups(f"thread_{thread_id}")
+            - AssetSelection.assets(posts_asset_key)
+            - AssetSelection.assets(implicit_key)
+        ),
+        partitions_def=partitions_def,
+        description=(
+            f"Sync posts and extract quote edges to ArangoDB for thread {thread_id}. "
+            "Triggered by AutomationCondition.eager() after each successful crawl."
+        ),
+    )
+
+    implicit_reply_job = define_asset_job(
+        name=f"implicit_reply_job_{thread_id}",
+        selection=AssetSelection.assets(implicit_key),
+        partitions_def=partitions_def,
+        description=(
+            f"Detect implicit reply edges for thread {thread_id}. "
+            "Triggered by implicit_reply_sensor once all preceding partitions complete."
+        ),
+        tags={"dagster/concurrency_key": "voz_llm"},
+    )
+
+    return reply_graph_job, implicit_reply_job

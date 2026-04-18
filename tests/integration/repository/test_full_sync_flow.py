@@ -108,7 +108,8 @@ def test_changed_content_triggers_re_upsert(clean_arango_db, sqlite_engine):
     with sqlite_engine.begin() as conn:
         conn.execute(
             t(
-                "UPDATE voz__posts SET raw_content_text = 'updated content here' WHERE post_id_on_site = 1001"
+                "UPDATE voz__posts SET raw_content_text = 'updated content here'"
+                " WHERE post_id_on_site = 1001"
             )
         )
 
@@ -149,7 +150,8 @@ def test_changed_post_resets_embedding(clean_arango_db, sqlite_engine):
     with sqlite_engine.begin() as conn:
         conn.execute(
             t(
-                "UPDATE voz__posts SET raw_content_text = 'totally new content here' WHERE post_id_on_site = 1001"
+                "UPDATE voz__posts SET raw_content_text = 'totally new content here'"
+                " WHERE post_id_on_site = 1001"
             )
         )
 

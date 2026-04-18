@@ -50,21 +50,6 @@ services:
       postgres:
         condition: service_healthy
 
-  dbhub:
-    image: bytebase/dbhub
-    restart: unless-stopped
-    command:
-      - "--transport=http"
-      - "--port=8080"
-      - "--dsn=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
-    ports:
-      - "8888:8080"
-    networks:
-      - voz_net
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   arangodb:
     image: arangodb:3.12.7
     restart: unless-stopped
@@ -79,9 +64,17 @@ services:
     ports:
       - "8529:8529"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8529/_api/version"]
+      test:
+        - "CMD-SHELL"
+        - >-
+          arangosh
+          --server.endpoint=tcp://127.0.0.1:8529
+          --server.username=root
+          --server.password=$$ARANGO_ROOT_PASSWORD
+          --javascript.execute-string='db._version()'
+          --quiet 2>/dev/null
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 5
 
   flaresolverr:
