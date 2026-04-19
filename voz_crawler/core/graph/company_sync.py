@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from voz_crawler.core.entities.arango import ExtractionResultDoc
 from voz_crawler.core.entities.company import AliasEvidenceDoc, CompanyMentionDoc, MentionEdge
 from voz_crawler.core.entities.enrichment import ENRICHMENT_VERSION
 
@@ -13,23 +14,19 @@ class CompanyMentionStats:
 
 
 def build_company_mention_docs(
-    extraction_results: list[dict],
+    extraction_results: list[ExtractionResultDoc],
     partition_key: str,
 ) -> tuple[list[CompanyMentionDoc], list[MentionEdge], list[AliasEvidenceDoc]]:
-    """Convert ExtractionResultDoc records into CompanyMentionDoc + MentionEdge + AliasEvidenceDoc.
-
-    extraction_results: raw dicts from fetch_extraction_results().
-    Returns (mention_docs, mention_edges, alias_evidence_docs).
-    """
+    """Convert ExtractionResultDoc records into CompanyMentionDoc + MentionEdge + AliasEvidenceDoc."""
     mention_docs: list[CompanyMentionDoc] = []
     mention_edges: list[MentionEdge] = []
     alias_evidence_docs: list[AliasEvidenceDoc] = []
     now = datetime.now(timezone.utc).isoformat()
 
     for doc in extraction_results:
-        post_key = doc["post_key"]
+        post_key = doc.post_key
 
-        for ordinal, mention in enumerate(doc.get("company_mentions", []), start=1):
+        for ordinal, mention in enumerate(doc.company_mentions, start=1):
             mention_key = f"{post_key}_{ordinal}"
             mention_docs.append(
                 CompanyMentionDoc(
@@ -54,7 +51,7 @@ def build_company_mention_docs(
                 )
             )
 
-        for alias_def in doc.get("alias_definitions", []):
+        for alias_def in doc.alias_definitions:
             import re
 
             alias_slug = re.sub(r"[^a-z0-9]+", "-", alias_def["alias"].lower()).strip("-")

@@ -3,6 +3,7 @@ import os
 from dagster import (
     AssetSelection,
     AutomationConditionSensorDefinition,
+    DefaultSensorStatus,
     Definitions,
     DynamicPartitionsDefinition,
     EnvVar,
@@ -80,6 +81,7 @@ defs = Definitions(
         AutomationConditionSensorDefinition(
             "default_automation_condition_sensor",
             target=AssetSelection.all(),
+            default_status=DefaultSensorStatus.RUNNING,
         ),
     ],
     resources={

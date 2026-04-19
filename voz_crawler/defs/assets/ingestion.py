@@ -1,7 +1,6 @@
 import dlt
-from dagster import AssetExecutionContext, AssetKey, DynamicPartitionsDefinition
-from dagster_dlt import DagsterDltResource, DagsterDltTranslator, dlt_assets
-from dagster_dlt.translator import DltResourceTranslatorData  # noqa: F401 (used in type annotation)
+from dagster import AssetExecutionContext, AssetKey, AssetSpec, DynamicPartitionsDefinition
+from dagster_dlt import DagsterDltTranslator, DagsterDltResource, dlt_assets
 
 from voz_crawler.core.ingestion.html_source.pagination import build_page_url
 from voz_crawler.defs.resources.crawler_resource import CrawlerResource
@@ -10,59 +9,55 @@ from voz_crawler.dlt.sources.voz_thread import voz_page_source
 
 
 class _ThreadDltTranslator(DagsterDltTranslator):
-    """Prefixes all asset keys with thread_id so per-thread dlt assets are unique."""
+    """Prepends thread_id to every dlt asset key so multi-thread pipelines don't collide."""
 
-    def __init__(self, thread_id: str, group_name: str):
+    def __init__(self, thread_id: str, group_name: str) -> None:
         self._thread_id = thread_id
         self._group_name = group_name
 
-    def get_asset_spec(self, data: DltResourceTranslatorData):
+    def get_asset_spec(self, data) -> AssetSpec:
         spec = super().get_asset_spec(data)
-        return spec.replace_attributes(
-            key=AssetKey([self._thread_id, *spec.key.path]),
-            group_name=self._group_name,
-        )
+        prefixed_key = AssetKey([self._thread_id] + list(spec.key.path))
+        return spec.replace_attributes(key=prefixed_key, group_name=self._group_name)
 
 
 def build_ingestion_assets(thread_id: str, partitions_def: DynamicPartitionsDefinition):
-    """Returns a dlt_assets definition scoped to a single thread.
+    """Returns a @dlt_assets definition scoped to a single thread.
 
-    Uses _ThreadDltTranslator to prefix asset keys with thread_id, giving each thread
-    unique asset keys (e.g. AssetKey([thread_id, "dlt_voz_page_voz__posts"])).
-
-    The placeholder source/pipeline are constructed at decoration time (module load)
-    with dummy URLs — dlt source construction is lazy, no HTTP requests are made.
-    The real source and pipeline are created inside the asset function body.
+    Uses DagsterDltTranslator to inject thread_id as key prefix so asset keys are
+    unique across threads (e.g. AssetKey([thread_id, "voz__posts"])).
+    pipeline_name is also scoped per thread to avoid dlt state collisions.
     """
-    _placeholder_source = voz_page_source(
-        page_url="https://placeholder", flaresolverr_url="http://placeholder:8191"
+    placeholder_source = voz_page_source(
+        page_url="https://placeholder",
+        flaresolverr_url="http://placeholder:8191",
     )
-    _placeholder_pipeline = dlt.pipeline(
+    placeholder_pipeline = dlt.pipeline(
         pipeline_name=f"voz_crawler_{thread_id}",
         destination=dlt.destinations.postgres(),
         dataset_name="raw",
     )
 
     @dlt_assets(
-        dlt_source=_placeholder_source,
-        dlt_pipeline=_placeholder_pipeline,
+        dlt_source=placeholder_source,
+        dlt_pipeline=placeholder_pipeline,
         name=f"voz_page_posts_{thread_id}",
+        partitions_def=partitions_def,
         dagster_dlt_translator=_ThreadDltTranslator(
             thread_id=thread_id,
             group_name=f"thread_{thread_id}",
         ),
-        partitions_def=partitions_def,
     )
-    def ingestion_assets(
+    def voz_page_posts_asset(
         context: AssetExecutionContext,
         dagster_dlt: DagsterDltResource,
         crawler: CrawlerResource,
         postgres: PostgresResource,
     ):
+        thread_url = crawler.url_for_thread(thread_id)
         _, page_num_str = context.partition_key.rsplit(":", 1)
-        page_num = int(page_num_str)
-        page_url = build_page_url(crawler.url_for_partition(context.partition_key), page_num)
-        context.log.info(f"Crawling page {page_num}: {page_url}")
+        page_url = build_page_url(thread_url, int(page_num_str))
+        context.log.info(f"[{thread_id}] Crawling page {page_num_str}: {page_url}")
 
         runtime_source = voz_page_source(
             page_url=page_url,
@@ -80,4 +75,4 @@ def build_ingestion_assets(thread_id: str, partitions_def: DynamicPartitionsDefi
             dlt_pipeline=runtime_pipeline,
         )
 
-    return ingestion_assets
+    return voz_page_posts_asset

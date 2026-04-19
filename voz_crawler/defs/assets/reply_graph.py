@@ -261,13 +261,14 @@ def build_thread_assets(
                 partition_mapping=IdentityPartitionMapping(),
             )
         ],
+        op_tags={"dagster/concurrency_key": "voz_llm"},
         automation_condition=AutomationCondition.eager(),
         description="OpenAI text-embedding-3-small embeddings for normalized_own_text.",
     )(_embed_fn)
 
-    # ── 5. classify_posts ────────────────────────────────────────────────────
+    # ── 5. extract_company_mentions (classify + extract merged) ─────────────
 
-    def _classify_fn(
+    def _mentions_fn(
         context: AssetExecutionContext,
         arango: ArangoDBResource,
         openai: OpenAIResource,
@@ -275,75 +276,45 @@ def build_thread_assets(
         partition_key = context.partition_key
         arango_repo = arango.get_repository()
 
+        # Phase 1 — LLM classification + extraction (skipped if already current)
         items = arango_repo.fetch_posts_needing_enrichment(partition_key, ENRICHMENT_VERSION)
-        context.log.info(f"[classify] {len(items)} posts need enrichment")
+        context.log.info(f"[extract_mentions] {len(items)} posts need enrichment")
 
-        if not items:
-            return MaterializeResult(
-                metadata={
-                    "enriched": MetadataValue.int(0),
-                    "enrichment_version": MetadataValue.int(ENRICHMENT_VERSION),
-                }
+        llm_stats = None
+        if items:
+            extraction_docs, enrichment_patches, llm_stats = run_llm_enrichment(
+                items, openai.api_key, partition_key
             )
-
-        extraction_docs, enrichment_patches, stats = run_llm_enrichment(
-            items, openai.api_key, partition_key
-        )
-
-        arango_repo.upsert_extraction_results(extraction_docs)
-        arango_repo.patch_post_enrichment_fields(enrichment_patches)
-
-        context.log.info(f"[classify] enriched={stats.enriched} errors={stats.errors}")
-        if stats.error_keys:
-            context.log.warning(f"[classify] failed keys: {stats.error_keys[:10]}")
-
-        return MaterializeResult(
-            metadata={
-                "enriched": MetadataValue.int(stats.enriched),
-                "errors": MetadataValue.int(stats.errors),
-                "llm_request_tokens": MetadataValue.int(stats.request_tokens),
-                "llm_response_tokens": MetadataValue.int(stats.response_tokens),
-                "enrichment_version": MetadataValue.int(ENRICHMENT_VERSION),
-            }
-        )
-
-    classify_posts = asset(
-        name="classify_posts",
-        key_prefix=[thread_id],
-        partitions_def=partitions_def,
-        group_name=group,
-        compute_kind="OpenAI",
-        deps=[
-            AssetDep(
-                AssetKey([thread_id, "normalize_posts"]),
-                partition_mapping=IdentityPartitionMapping(),
+            arango_repo.upsert_extraction_results(extraction_docs)
+            arango_repo.patch_post_enrichment_fields(enrichment_patches)
+            context.log.info(
+                f"[extract_mentions] enriched={llm_stats.enriched} errors={llm_stats.errors}"
             )
-        ],
-        op_tags={"dagster/concurrency_key": "voz_llm"},
-        automation_condition=AutomationCondition.eager(),
-        description="LLM-classified posts: content_class, has_company_mention, enrichment_version.",
-    )(_classify_fn)
+            if llm_stats.error_keys:
+                context.log.warning(
+                    f"[extract_mentions] failed keys: {llm_stats.error_keys[:10]}"
+                )
 
-    # ── 6. extract_company_mentions ──────────────────────────────────────────
-
-    def _mentions_fn(
-        context: AssetExecutionContext,
-        arango: ArangoDBResource,
-    ) -> MaterializeResult:
-        partition_key = context.partition_key
-        arango_repo = arango.get_repository()
-
+        # Phase 2 — project mentions (always runs so re-runs recover failed writes)
         raw_docs = arango_repo.fetch_extraction_results(partition_key, ENRICHMENT_VERSION)
-        extraction_docs = [ExtractionResultDoc.model_validate(d) for d in raw_docs]
-        non_noise = [
-            doc for doc in extraction_docs if doc.content_class in {"review", "rating", "event"}
-        ]
+        result_docs = [ExtractionResultDoc.model_validate(d) for d in raw_docs]
+        non_noise = [d for d in result_docs if d.content_class in {"review", "rating", "event"}]
 
-        context.log.info(f"[mentions] total={len(extraction_docs)} eligible={len(non_noise)}")
+        context.log.info(
+            f"[extract_mentions] total={len(result_docs)} eligible={len(non_noise)}"
+        )
+
+        enriched_count = llm_stats.enriched if llm_stats else 0
+        error_count = llm_stats.errors if llm_stats else 0
+        req_tokens = llm_stats.request_tokens if llm_stats else 0
+        res_tokens = llm_stats.response_tokens if llm_stats else 0
 
         if not non_noise:
             return MaterializeResult(
                 metadata={
+                    "enriched": MetadataValue.int(enriched_count),
+                    "errors": MetadataValue.int(error_count),
+                    "enrichment_version": MetadataValue.int(ENRICHMENT_VERSION),
                     "mention_docs": MetadataValue.int(0),
                     "skipped_reason": MetadataValue.text("all posts are noise/question class"),
                 }
@@ -359,11 +330,16 @@ def build_thread_assets(
         arango_repo.upsert_alias_evidence(alias_evidence)
 
         context.log.info(
-            f"[mentions] docs={len(mention_docs)} edges={len(mention_edges)}"
+            f"[extract_mentions] docs={len(mention_docs)} edges={len(mention_edges)}"
             f" alias_evidence={len(alias_evidence)}"
         )
         return MaterializeResult(
             metadata={
+                "enriched": MetadataValue.int(enriched_count),
+                "errors": MetadataValue.int(error_count),
+                "llm_request_tokens": MetadataValue.int(req_tokens),
+                "llm_response_tokens": MetadataValue.int(res_tokens),
+                "enrichment_version": MetadataValue.int(ENRICHMENT_VERSION),
                 "mention_docs": MetadataValue.int(len(mention_docs)),
                 "mention_edges": MetadataValue.int(len(mention_edges)),
                 "alias_evidence_docs": MetadataValue.int(len(alias_evidence)),
@@ -375,17 +351,18 @@ def build_thread_assets(
         key_prefix=[thread_id],
         partitions_def=partitions_def,
         group_name=group,
-        compute_kind="ArangoDB",
+        compute_kind="OpenAI",
         deps=[
             AssetDep(
-                AssetKey([thread_id, "classify_posts"]),
+                AssetKey([thread_id, "normalize_posts"]),
                 partition_mapping=IdentityPartitionMapping(),
             )
         ],
+        op_tags={"dagster/concurrency_key": "voz_llm"},
         automation_condition=AutomationCondition.eager(),
         description=(
-            "Company mention vertices + edges from posts with content_class in"
-            " {review, rating, event}."
+            "LLM classify (content_class, enrichment_version) then project"
+            " company mention vertices + edges for posts in {review, rating, event}."
         ),
     )(_mentions_fn)
 
@@ -444,7 +421,6 @@ def build_thread_assets(
         extract_explicit_edges,
         normalize_posts,
         compute_embeddings,
-        classify_posts,
         extract_company_mentions,
         detect_implicit_replies,
     ]

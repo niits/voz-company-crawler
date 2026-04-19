@@ -21,6 +21,11 @@ ENV DAGSTER_HOME=/dagster_home
 ENV PYTHONPATH=/app
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Bake dagster config so run containers launched by DockerRunLauncher can find it.
+# (dagster_webserver/daemon override this via bind mount; user_code + run containers use this copy)
+RUN mkdir -p /dagster_home
+COPY docker/dev/dagster.docker.yaml /dagster_home/dagster.yaml
+
 EXPOSE 4000
 CMD ["uv", "run", "dagster", "code-server", "start", \
      "--host", "0.0.0.0", \

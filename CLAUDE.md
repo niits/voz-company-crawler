@@ -45,12 +45,11 @@ voz_crawler/
       ingestion.py        build_ingestion_assets(thread_id, partitions_def) factory
                             → per-thread @dlt_assets with key_prefix=[thread_id]
       reply_graph.py      build_thread_assets(thread_id, partitions_def, posts_asset_key) factory
-                            → 7 assets per thread: sync_posts_to_arango (@asset),
+                            → 6 assets per thread: sync_posts_to_arango (@asset),
                             extract_explicit_edges (@asset),
                             normalize_posts (@asset),
                             compute_embeddings (@asset),
-                            classify_posts (@asset),
-                            extract_company_mentions (@asset, non-noise only),
+                            extract_company_mentions (@asset, classify+extract merged),
                             detect_implicit_replies (@asset, sensor-gated)
     jobs/
       ingestion.py        build_ingestion_jobs(thread_id, ...) factory
@@ -146,7 +145,7 @@ On Cloudflare block (403/429/503), the asset raises `RuntimeError`. Safe — nex
 
 ## Reply Graph Pipeline
 
-Seven assets per thread (in group `thread_{thread_id}`) run after each successful crawl partition. They form a diamond-shaped DAG: two fast parallel branches (`extract_explicit_edges` and `normalize_posts`) fan out from `sync_posts_to_arango`, then `normalize_posts` fans out again into a parallel embedding + classification pair.
+Six assets per thread (in group `thread_{thread_id}`) run after each successful crawl partition. They form a diamond-shaped DAG: two fast parallel branches (`extract_explicit_edges` and `normalize_posts`) fan out from `sync_posts_to_arango`, then `normalize_posts` fans out again into a parallel embedding + enrichment pair.
 
 ### Asset execution order
 
@@ -154,13 +153,12 @@ Seven assets per thread (in group `thread_{thread_id}`) run after each successfu
 sync_posts_to_arango
     ├── extract_explicit_edges          (branch A — fast, stateless)
     └── normalize_posts
-            ├── compute_embeddings      (parallel with classify_posts)
-            └── classify_posts          (parallel with compute_embeddings)
-                    └── extract_company_mentions  (non-noise only: review/rating/event)
-                                └── detect_implicit_replies  (sensor-gated)
-                                        ▲
-                                        │ (also deps)
-                                extract_explicit_edges
+            ├── compute_embeddings      (parallel with extract_company_mentions)
+            └── extract_company_mentions  (LLM classify + mention projection merged)
+                        └── detect_implicit_replies  (sensor-gated)
+                                    ▲
+                                    │ (also deps)
+                            extract_explicit_edges
 ```
 
 ### Asset descriptions
@@ -173,9 +171,7 @@ sync_posts_to_arango
 
 **`compute_embeddings`** `[@asset]` — fetches posts with `normalized_own_text` but missing `embedding`, calls OpenAI `text-embedding-3-small`, writes `embedding` + `embedding_model`. Runs in parallel with `classify_posts` after `normalize_posts`.
 
-**`classify_posts`** `[@asset]` — fetches posts with stale `enrichment_version`, runs LLM via PydanticAI to classify `content_class` and extract company mentions, writes `ExtractionResultDoc` + enrichment patches (`content_class`, `has_company_mention`, `enrichment_version`). Depends on `normalize_posts` (text), not `compute_embeddings`. Runs in parallel with `compute_embeddings`.
-
-**`extract_company_mentions`** `[@asset]` — reads `ExtractionResultDoc` for the partition, filters to `content_class in {"review", "rating", "event"}`, projects `CompanyMentionDoc` + `MentionEdge` + `AliasEvidenceDoc`, drops and re-inserts mention data. Returns `MaterializeResult` with `mention_docs: 0` metadata if all posts are noise/question (partition shows as materialized, not failed).
+**`extract_company_mentions`** `[@asset]` — merged classify + extract step. Phase 1: fetches posts with stale `enrichment_version`, runs LLM via PydanticAI to classify `content_class` and extract company mentions, writes `ExtractionResultDoc` + enrichment patches (`content_class`, `has_company_mention`, `enrichment_version`). Phase 2 (always runs, so re-runs recover failed writes): reads current `ExtractionResultDoc` from DB, filters to `content_class in {"review", "rating", "event"}`, projects `CompanyMentionDoc` + `MentionEdge` + `AliasEvidenceDoc`, drops and re-inserts mention data. Depends on `normalize_posts`, runs in parallel with `compute_embeddings`.
 
 **`detect_implicit_replies`** `[@asset]` — BM25 + cosine re-rank + PydanticAI agent to detect implicit reply edges. No `AutomationCondition.eager()` — triggered by `implicit_reply_sensor` only after all lower-numbered partitions have materialized `extract_company_mentions`. Depends on both `extract_company_mentions` AND `extract_explicit_edges` (explicit edges must exist before implicit detection so the `already_linked` exclusion is correct). Uses noise-aware adaptive window and passes `content_class` labels to the LLM for each candidate.
 

@@ -46,7 +46,7 @@ class NormalizedPostDoc(SQLModel):
     embedding: list[float] | None = None
     embedding_model: str | None = None
 
-    # Owned by: classify_posts (fast-filter projections from ExtractionResultDoc)
+    # Owned by: extract_company_mentions (fast-filter projections from ExtractionResultDoc)
     content_class: str | None = None  # review | rating | event | question | noise
     content_class_confidence: float | None = None
     has_company_mention: bool | None = None
@@ -79,7 +79,7 @@ class ExtractionResultDoc(SQLModel):
     # Alias definitions the LLM detected in this post
     alias_definitions: list[dict]  # list[AliasDefinitionResult.model_dump()]
 
-    # Implicit reply decisions — written by detect_implicit_replies after classify_posts
+    # Implicit reply decisions — written by detect_implicit_replies after extract_company_mentions
     implicit_replies: list[dict]  # list[ImplicitReply.model_dump()]
 
     # Full PydanticAI message history for audit (system prompt + user input + assistant output)
