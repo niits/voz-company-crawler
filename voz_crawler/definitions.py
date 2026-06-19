@@ -14,6 +14,7 @@ from dagster_openai import OpenAIResource
 from voz_crawler.core.ingestion.html_source.pagination import extract_thread_id
 from voz_crawler.defs.assets.ingestion import build_ingestion_assets
 from voz_crawler.defs.assets.reply_graph import build_thread_assets
+from voz_crawler.defs.assets.resolution import build_resolution_pipeline
 from voz_crawler.defs.jobs.ingestion import build_ingestion_jobs
 from voz_crawler.defs.jobs.reply_graph import build_thread_jobs
 from voz_crawler.defs.ops.ingestion import build_discover_op
@@ -73,9 +74,15 @@ for _thread_id in _thread_ids:
     _all_jobs.extend(_jobs)
     _all_sensors.extend(_sensors)
 
+# ── Global resolution tier (one instance, not per-thread) ─────────────────────
+_resolve_asset, _resolve_job, _resolve_schedule = build_resolution_pipeline()
+_all_assets.append(_resolve_asset)
+_all_jobs.append(_resolve_job)
+
 defs = Definitions(
     assets=_all_assets,
     jobs=_all_jobs,
+    schedules=[_resolve_schedule],
     sensors=[
         *_all_sensors,
         AutomationConditionSensorDefinition(

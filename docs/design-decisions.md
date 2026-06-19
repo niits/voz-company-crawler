@@ -63,7 +63,7 @@ Each `_build_thread_pipeline(thread_id)` creates:
 - `build_discover_op(thread_id, partitions_def)` → named `discover_pages_op_{thread_id}`
 - `build_ingestion_jobs(...)` → `discover_pages_job_{thread_id}`, `crawl_page_job_{thread_id}`
 - `build_ingestion_sensors(...)` → `voz_discover_sensor_{thread_id}` (6-hour), `voz_crawl_sensor_{thread_id}` (run_status_sensor)
-- `build_thread_assets(thread_id, partitions_def, posts_asset_key)` → 7 reply-graph assets
+- `build_thread_assets(thread_id, partitions_def, posts_asset_key)` → 4 reply-graph assets (see decision 17)
 - `build_thread_jobs(...)` → `reply_graph_job_{thread_id}`, `implicit_reply_job_{thread_id}`
 - `build_implicit_sensor(...)` → `implicit_reply_sensor_{thread_id}`
 
@@ -76,7 +76,7 @@ Each `_build_thread_pipeline(thread_id)` creates:
 
 **Concurrency**: `dagster/concurrency_key` is global across all threads. Tags `voz_llm` and `voz_crawl` throttle total concurrent LLM calls and crawl runs across all threads — this is the desired behavior (shared budget, not per-thread budget).
 
-**Future merge step**: A `merge_entities` asset (unpartitioned or time-partitioned) will depend on all threads' `extract_company_mentions` via `AllPartitionMapping()`. This step uses a separate partition definition and is not coupled to the per-thread crawl pipeline.
+**Global merge step (implemented)**: The cross-thread `resolve_companies` asset is unpartitioned, runs outside this factory, and aggregates all threads' alias evidence. It is not coupled to the per-thread crawl pipeline — see decision 18.
 
 ---
 
@@ -163,9 +163,11 @@ Each `_build_thread_pipeline(thread_id)` creates:
 
 ---
 
-### 13. Reply graph asset topology: flat individual assets for UI dependency visibility
+### 13. Reply graph asset topology: flat individual assets, split only where it pays
 
-**Decision**: Define all seven reply-graph assets as individual `@asset` definitions with explicit `AssetDep` / `AssetIn` wiring, replacing the previous `@graph_multi_asset` approach.
+**Decision**: Define the reply-graph assets as individual `@asset` definitions with explicit `AssetDep` wiring (replacing the earlier `@graph_multi_asset` approach), but only split an asset out when the split buys something concrete: an independent paid-API cost boundary, an independent version/backfill knob, or sensor gating. Cheap, stateless, single-Postgres-read steps are kept in one asset.
+
+> **Tweak (2026-06):** the topology was consolidated from seven assets to **four**. The three cheap stateless steps (`sync_posts_to_arango`, `extract_explicit_edges`, `normalize_posts`) were merged into a single `build_posts_layer` asset, and `classify_posts` + `extract_company_mentions` had already merged into one `extract_company_mentions`. See decision 17 for the consolidation rationale.
 
 **Topology**:
 
@@ -173,32 +175,27 @@ Each `_build_thread_pipeline(thread_id)` creates:
 dlt_voz_posts
     │
     ▼
-sync_posts_to_arango  [@asset]
+build_posts_layer  [@asset]
+    │   (Layer 1 upsert + quote edges + normalization, one Postgres read)
     │
     ├────────────────────────┐
     ▼                        ▼
-extract_explicit_edges  normalize_posts  [@asset]
-    [@asset]                 │
-    │               ┌────────┴────────┐
-    │               ▼                 ▼
-    │       compute_embeddings   classify_posts  [@asset]
-    │           [@asset]              │
-    │                                 ▼
-    │                    extract_company_mentions  [@asset]
-    │                    (content_class ∈ {review, rating, event})
-    │                                 │
-    └──────────────────┬──────────────┘
-                       ▼
-               detect_implicit_replies [@asset]
+compute_embeddings   extract_company_mentions  [@asset]
+    [@asset]          (LLM classify + project mentions
+    │                  for content_class ∈ {review, rating, event})
+    │                        │
+    └──────────┬─────────────┘
+               ▼
+       detect_implicit_replies  [@asset]  (sensor-gated)
 ```
 
 **Why individual `@asset` instead of `@graph_multi_asset`**:
-- `@graph_multi_asset` outputs are catalog-level siblings — Dagster has no visibility into internal op chaining. `normalize_posts` and `compute_embeddings` appeared as parallel siblings of `sync_posts_to_arango` in the UI, hiding the actual sequential dependency.
+- `@graph_multi_asset` outputs are catalog-level siblings — Dagster has no visibility into internal op chaining, so sequential dependencies appeared as parallel siblings in the UI.
 - Individual `@asset` definitions with explicit `AssetDep` wiring make the full dependency chain visible in Dagit's asset lineage graph, enabling correct automation trigger ordering and clearer debugging.
 
-**Why `classify_posts` depends on `normalize_posts`, not `compute_embeddings`**:
-- LLM classification uses `normalized_own_text` (text). Embeddings are only needed by `detect_implicit_replies` (cosine similarity). Wiring `classify_posts → compute_embeddings` would serialize the LLM branch behind embedding computation unnecessarily.
-- With `normalize_posts` as the shared upstream, `compute_embeddings` and `classify_posts` run in parallel — both trigger the moment `normalize_posts` materializes.
+**Why `compute_embeddings` and `extract_company_mentions` stay separate (the fan-out that pays)**:
+- They have genuinely different cost/reliability profiles: embeddings are a cheap, reliable batch call; LLM enrichment is expensive and flaky. Keeping them separate means an LLM failure never wastes embedding spend, and each carries its own version knob (`EMBEDDING_MODEL` vs `ENRICHMENT_VERSION`).
+- Both read `normalized_own_text` (produced by `build_posts_layer`) and need nothing from each other, so they run in parallel — both trigger the moment `build_posts_layer` materializes.
 
 **Why `extract_company_mentions` filters to `content_class ∈ {review, rating, event}`**:
 - `question` posts ask about companies but contain no direct evaluation data — projecting mentions from them produces noisy edges with low signal.
@@ -206,9 +203,8 @@ extract_explicit_edges  normalize_posts  [@asset]
 - `review`, `rating`, and `event` posts have verifiable company references and are the target of the knowledge graph.
 - If all posts in a partition are noise/question, `extract_company_mentions` materializes with `mention_docs: 0` metadata — the partition remains green in the UI and `detect_implicit_replies` can still run.
 
-**Why `detect_implicit_replies` depends on both `extract_company_mentions` AND `extract_explicit_edges`**:
-- `fetch_implicit_reply_candidates` queries `reply_graph` to compute `already_linked` — posts already connected by explicit quote edges. Without `extract_explicit_edges` having run first, this exclusion is incomplete.
-- `extract_explicit_edges` finishes in O(seconds); the LLM chain is O(minutes) — in practice it always completes first, but the dependency is required for correctness.
+**Why `detect_implicit_replies` depends on `extract_company_mentions` only**:
+- `fetch_implicit_reply_candidates` queries `reply_graph` to compute `already_linked` — posts already connected by explicit quote edges. Those edges are now written by `build_posts_layer`, which is a transitive ancestor of `extract_company_mentions`, so depending on `extract_company_mentions` already guarantees the edges exist. (Previously this required an explicit second dep on `extract_explicit_edges`; that asset no longer exists.)
 
 **AutomationCondition.eager() scope**:
 - All assets except `detect_implicit_replies` carry `eager()`. The implicit reply asset is sensor-gated and must not auto-trigger on every `extract_company_mentions` materialization.
@@ -224,23 +220,42 @@ extract_explicit_edges  normalize_posts  [@asset]
 
 | Field | Owner asset | Meaning |
 |---|---|---|
-| `normalization_version` | `normalize_posts` | Version of the normalization logic applied |
+| `normalization_version` | `build_posts_layer` | Version of the normalization logic applied |
 | `embedding_model` | `compute_embeddings` | OpenAI model name used for the embedding |
-| `enrichment_version` | `classify_posts` (via `ExtractionResultDoc`) | Version of the LLM extraction prompt/schema |
+| `enrichment_version` | `extract_company_mentions` (via `ExtractionResultDoc`) | Version of the LLM extraction prompt/schema |
 
 **Staleness checks** (at the start of each asset):
-- `normalize_posts`: post needs processing if `normalization_version == null OR normalization_version < NORMALIZATION_VERSION`
-- `compute_embeddings`: post needs processing if `embedding == null` (model staleness triggers re-embedding when `EMBEDDING_MODEL` changes via `sync_posts_to_arango` resetting `embedding=null` on content change)
-- `classify_posts`: post needs processing if no `ExtractionResultDoc` exists with `enrichment_version == ENRICHMENT_VERSION`
+- `build_posts_layer`: a post is (re)normalized if `normalization_version == null OR normalization_version < NORMALIZATION_VERSION`. Newly upserted/changed posts have Layer 2 reset to null, so they always normalize; the HTML is already in memory from the single Postgres read.
+- `compute_embeddings`: post needs processing if `embedding == null` (model staleness triggers re-embedding when `EMBEDDING_MODEL` changes via `build_posts_layer` resetting `embedding=null` on content change)
+- `extract_company_mentions`: post needs processing if no `ExtractionResultDoc` exists with `enrichment_version == ENRICHMENT_VERSION`
 
 **Why no cascade writes**:
 - Writing a `needs_reprocess=True` flag on content change couples the sync layer to enrichment layer semantics. If enrichment adds a new version field, sync must be updated too.
 - Version-constant staleness checks are self-contained: bumping `NORMALIZATION_VERSION` in code is the only action needed to trigger a backfill. Dagster `eager()` propagates re-materialization naturally through the asset graph.
 
 **Cascade path when bumping `NORMALIZATION_VERSION`**:
-1. `normalize_posts` re-runs (staleness check triggers for all posts in partition)
-2. `compute_embeddings` and `classify_posts` eager-trigger in parallel
-3. `classify_posts` checks `ExtractionResultDoc.enrichment_version` — unchanged constant → no LLM re-run unless `ENRICHMENT_VERSION` is also bumped
+1. `build_posts_layer` re-runs (staleness check re-normalizes all posts in partition; Layer 1 upsert and edge re-parse are idempotent, so re-running them is free)
+2. `compute_embeddings` and `extract_company_mentions` eager-trigger in parallel
+3. `extract_company_mentions` checks `ExtractionResultDoc.enrichment_version` — unchanged constant → no LLM re-run unless `ENRICHMENT_VERSION` is also bumped
+
+---
+
+### 17. Consolidating cheap stateless steps into `build_posts_layer`
+
+**Decision**: Merge `sync_posts_to_arango`, `extract_explicit_edges`, and `normalize_posts` into one `build_posts_layer` asset that reads the page from PostgreSQL once and writes Layer 1 posts, quote edges, and normalized text in a single pass.
+
+**Rationale**:
+- All three steps were cheap, stateless, idempotent, read the *same* page from PostgreSQL, and wrote only to the `posts`/`quotes` collections. As separate assets they cost three Postgres round-trips for the same page plus three sets of `AssetDep` wiring.
+- A separate Dagster asset only earns its keep when it provides an independent paid-API cost boundary, an independent version/backfill knob, distinct concurrency, or sensor gating. These three steps had none — the only "knob" was `NORMALIZATION_VERSION`, and bumping it just re-runs a cheap idempotent asset, so the independent backfill is preserved in practice.
+- The `extract_explicit_edges ∥ normalize_posts` fan-out looked like parallelism but both branches are O(seconds) BeautifulSoup work — the saved wall-clock time was negligible against two extra DB reads and an extra asset.
+
+**What is intentionally NOT merged**:
+- `compute_embeddings` and `extract_company_mentions` stay separate — different paid-API cost/reliability profiles and independent version knobs (see decision 13).
+- `detect_implicit_replies` stays separate — sensor-gated with cross-partition ordering that an `AutomationCondition` cannot express.
+
+**Trade-off**: `build_posts_layer` re-parses quote edges and re-checks normalization on every content-change re-run, even though only one sub-step may have changed. Given all sub-steps are O(seconds) and idempotent, this is cheaper than maintaining three assets and their wiring.
+
+**Implementation note**: `RawRepository.fetch_posts_full` returns every column for a page in one query; `build_upsert_docs`, `build_edges`, and `normalize_post_html` remain pure transforms consuming those in-memory rows. Normalization staleness is still read from ArangoDB via `fetch_posts_needing_normalization` after the upsert, so version-bump backfills of pre-existing posts are still detected.
 
 ---
 
@@ -287,3 +302,32 @@ Example: `adaptive_n=3`, posts before target = `[A(review), noise, B(question), 
 **Fix 2 — definitions.py**: Wrap `yield from dagster_dlt.run(...)` in `try/finally` and call `client.sql_client._engine.dispose()` via the pipeline's `destination_client()` context manager. Errors are suppressed (best-effort cleanup).
 
 **Why not PgBouncer**: dlt uses `COPY` commands, session-level advisory locks, and multi-statement transactions — incompatible with PgBouncer's transaction-mode pooling (the only mode that reduces connection count). Session-mode PgBouncer would not reduce connections enough to justify the added complexity.
+
+---
+
+### 18. Global `resolve_companies` tier — cross-thread alias resolution
+
+**Decision**: Add a single, unpartitioned `resolve_companies` asset that runs *outside* the per-thread factory. It aggregates every thread's `alias_evidence` into `company_aliases`, stubs `companies`, and back-patches `company_mention.company_key`. It is triggered by a schedule (`resolve_companies_schedule`, hourly), not by `AutomationCondition.eager()`.
+
+**Why global, not per-thread**:
+- Resolution is inherently cross-thread: an alias defined in one thread (e.g. "nhà F" → FPT) must resolve mentions in *every* thread. A per-thread resolution asset could never see that evidence.
+- The target review threads are alias-centric by construction (the seed thread is literally titled *"Viết tắt tên mọi cty"* — abbreviate every company name), so unifying aliases is the core requirement, not an optimization. Without it, mentions are grouped only by the LLM's per-post `company_name` guess, which is unstable across posts ("FPT" vs "FPT Software" vs "nhà F" never unify).
+- This is the `merge_entities` step foreshadowed in decision 4: it uses no partition definition and is not coupled to any thread's crawl pipeline. The per-thread factory (decision 4) is intentionally preserved for the per-page tier; only the resolution stage is global.
+
+**Algorithm** (pure transforms in `core/graph/company_resolution.py`, orchestrated by the asset):
+1. **Aggregate aliases**: group `alias_evidence` by `alias_slug`; for each candidate `company_key`, score = Σ(`confidence` × `EVIDENCE_TYPE_WEIGHTS[evidence_type]`), normalized to [0, 1]. Build `CompanyAliasDoc.resolutions` sorted by score.
+2. **Flag ambiguity** (matching the `CompanyAliasDoc` model contract): `best_company_key` set when the top-2 score gap > `AMBIGUITY_GAP` (0.15); `is_ambiguous` when the gap ≤ 0.15; `is_unresolved` when the top score < `UNRESOLVED_THRESHOLD` (0.4).
+3. **Stub companies**: one `CompanyDoc` per referenced `company_key` (`is_stub=True`), `canonical_name` taken from the most frequent raw company name seen for that key.
+4. **Assign mention keys**: for each `CompanyMentionDoc`, resolve via its own `company_name` slug first, then its `identification_clues` against the alias index; set `company_key`, `is_ambiguous`, `resolution_version`.
+
+**Tunables** (isolated at the top of `company_resolution.py` so domain knowledge can adjust them without touching logic):
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `EVIDENCE_TYPE_WEIGHTS` | explicit_definition=1.0, disambiguation=0.7, co_occurrence=0.3, contradiction=−0.5 | How much each evidence kind counts |
+| `AMBIGUITY_GAP` | 0.15 | Top-2 score gap below which an alias is ambiguous |
+| `UNRESOLVED_THRESHOLD` | 0.4 | Top score below which an alias is unresolved |
+| `RESOLUTION_VERSION` | 1 | Bump to force a full re-resolution |
+
+**Trade-off / scope**: each run is a full recompute (reads all evidence + all mentions, rewrites aliases/companies, bulk-patches mentions). `alias_evidence` is small (only alias-defining posts), so recompute is cheap; `company_mention` patching is the larger write but bulk `update_many` handles it. Incremental resolution (by `resolution_version`) is a future optimization, deliberately deferred for correctness simplicity.
+

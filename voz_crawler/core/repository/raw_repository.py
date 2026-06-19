@@ -31,6 +31,39 @@ class RawRepository:
             schema=schema,
         )
 
+    def fetch_posts_full(self, page_url: str) -> list[RawPost]:
+        """Return all posts for a page with every column populated, in one query.
+
+        Used by build_posts_layer, which needs content_text (Layer 1 diff),
+        raw_content_html (quote edges + normalization), and the author/timestamp
+        metadata — fetching them together avoids three separate round-trips.
+        """
+        t = self._table
+        stmt = (
+            select(
+                t.c.post_id_on_site,
+                t.c.author_username,
+                t.c.author_id_on_site,
+                t.c.posted_at_raw,
+                t.c.raw_content_text,
+                t.c.raw_content_html,
+            )
+            .where(t.c.page_url == page_url)
+            .order_by(t.c.post_id_on_site)
+        )
+        with self._engine.connect() as conn:
+            return [
+                RawPost(
+                    post_id_on_site=r["post_id_on_site"],
+                    author_username=r["author_username"],
+                    author_id_on_site=r["author_id_on_site"],
+                    posted_at_raw=r["posted_at_raw"],
+                    raw_content_text=r["raw_content_text"],
+                    raw_content_html=r["raw_content_html"],
+                )
+                for r in conn.execute(stmt).mappings()
+            ]
+
     def fetch_posts(self, page_url: str) -> list[RawPost]:
         """Return all posts for a given page URL, ordered by post_id_on_site."""
         t = self._table
@@ -54,28 +87,6 @@ class RawRepository:
                     posted_at_raw=r["posted_at_raw"],
                     raw_content_text=r["raw_content_text"],
                     raw_content_html=None,
-                )
-                for r in conn.execute(stmt).mappings()
-            ]
-
-    def fetch_posts_with_html(self, page_url: str) -> list[RawPost]:
-        """Return all posts with raw_content_html for a given page URL (for normalization)."""
-        t = self._table
-        stmt = (
-            select(t.c.post_id_on_site, t.c.raw_content_html)
-            .where(t.c.page_url == page_url)
-            .where(t.c.raw_content_html.isnot(None))
-            .order_by(t.c.post_id_on_site)
-        )
-        with self._engine.connect() as conn:
-            return [
-                RawPost(
-                    post_id_on_site=r["post_id_on_site"],
-                    author_username=None,
-                    author_id_on_site=None,
-                    posted_at_raw=None,
-                    raw_content_text=None,
-                    raw_content_html=r["raw_content_html"],
                 )
                 for r in conn.execute(stmt).mappings()
             ]

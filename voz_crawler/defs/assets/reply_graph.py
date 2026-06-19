@@ -44,16 +44,16 @@ def build_thread_assets(
     partitions_def: DynamicPartitionsDefinition,
     posts_asset_key: AssetKey,
 ) -> list:
-    """Returns all 7 reply-graph asset definitions scoped to a single thread.
+    """Returns the 4 reply-graph asset definitions scoped to a single thread.
 
     Each call creates uniquely-named asset definitions (key_prefix=[thread_id])
     so multiple threads can coexist in the same Definitions without key collision.
     """
     group = f"thread_{thread_id}"
 
-    # ── 1. sync_posts_to_arango ──────────────────────────────────────────────
+    # ── 1. build_posts_layer (sync + edges + normalize, one Postgres read) ───
 
-    def _sync_fn(
+    def _build_posts_fn(
         context: AssetExecutionContext,
         postgres: PostgresResource,
         arango: ArangoDBResource,
@@ -64,123 +64,44 @@ def build_thread_assets(
         page_number = int(page_num_str)
         page_url = _page_url(partition_key, crawler)
 
-        context.log.info(f"[sync_posts] partition={partition_key!r} page_url={page_url}")
+        context.log.info(f"[build_posts] partition={partition_key!r} page_url={page_url}")
 
-        rows = postgres.get_repository().fetch_posts(page_url)
+        rows = postgres.get_repository().fetch_posts_full(page_url)
         if not rows:
-            context.log.warning(f"[sync_posts] no posts for page_url={page_url!r}")
+            context.log.warning(f"[build_posts] no posts for page_url={page_url!r}")
             return MaterializeResult(
                 metadata={
                     "posts_in_postgres": MetadataValue.int(0),
                     "posts_upserted": MetadataValue.int(0),
                     "posts_skipped_unchanged": MetadataValue.int(0),
+                    "edges_inserted": MetadataValue.int(0),
+                    "normalized": MetadataValue.int(0),
                 }
             )
 
         arango_repo = arango.get_repository()
-        existing_hashes = arango_repo.get_existing_hashes(partition_key)
         thread_url = crawler.url_for_partition(partition_key)
+
+        # ── Layer 1: content-hash diff + upsert (resets Layer 2 on change) ───
+        existing_hashes = arango_repo.get_existing_hashes(partition_key)
         to_upsert, skipped = build_upsert_docs(
             rows, existing_hashes, partition_key, thread_url, page_number
         )
         arango_repo.upsert_posts(to_upsert)
 
-        context.log.info(f"[sync_posts] upserted={len(to_upsert)} skipped={skipped}")
-        return MaterializeResult(
-            metadata={
-                "posts_in_postgres": MetadataValue.int(len(rows)),
-                "posts_upserted": MetadataValue.int(len(to_upsert)),
-                "posts_skipped_unchanged": MetadataValue.int(skipped),
-            }
-        )
-
-    sync_posts_to_arango = asset(
-        name="sync_posts_to_arango",
-        key_prefix=[thread_id],
-        partitions_def=partitions_def,
-        group_name=group,
-        compute_kind="ArangoDB",
-        deps=[AssetDep(posts_asset_key, partition_mapping=IdentityPartitionMapping())],
-        automation_condition=AutomationCondition.eager(),
-        description="Layer 1 posts in ArangoDB, content-hash diffed from PostgreSQL.",
-    )(_sync_fn)
-
-    # ── 2. extract_explicit_edges ────────────────────────────────────────────
-
-    def _edges_fn(
-        context: AssetExecutionContext,
-        postgres: PostgresResource,
-        arango: ArangoDBResource,
-        crawler: CrawlerResource,
-    ) -> MaterializeResult:
-        partition_key = context.partition_key
-        page_url = _page_url(partition_key, crawler)
-
-        context.log.info(f"[extract_edges] partition={partition_key!r}")
-
-        rows = postgres.get_repository().fetch_posts_with_blockquotes(page_url)
-        arango_repo = arango.get_repository()
+        # ── Quote edges: drop + re-parse + re-insert (stateless) ─────────────
         dropped = arango_repo.drop_partition_edges(partition_key)
         edges = build_edges(rows, partition_key)
         arango_repo.insert_edges(edges)
 
-        context.log.info(
-            f"[extract_edges] dropped={dropped} inserted={len(edges)} from {len(rows)} posts"
-        )
-        return MaterializeResult(
-            metadata={
-                "posts_with_quotes": MetadataValue.int(len(rows)),
-                "edges_dropped": MetadataValue.int(dropped),
-                "edges_inserted": MetadataValue.int(len(edges)),
-            }
-        )
-
-    extract_explicit_edges = asset(
-        name="extract_explicit_edges",
-        key_prefix=[thread_id],
-        partitions_def=partitions_def,
-        group_name=group,
-        compute_kind="ArangoDB",
-        deps=[
-            AssetDep(
-                AssetKey([thread_id, "sync_posts_to_arango"]),
-                partition_mapping=IdentityPartitionMapping(),
-            )
-        ],
-        automation_condition=AutomationCondition.eager(),
-        description="XenForo quote edges extracted from raw HTML blockquotes.",
-    )(_edges_fn)
-
-    # ── 3. normalize_posts ───────────────────────────────────────────────────
-
-    def _normalize_fn(
-        context: AssetExecutionContext,
-        postgres: PostgresResource,
-        arango: ArangoDBResource,
-        crawler: CrawlerResource,
-    ) -> MaterializeResult:
-        partition_key = context.partition_key
-        page_url = _page_url(partition_key, crawler)
-
-        arango_repo = arango.get_repository()
+        # ── Normalization: staleness-checked, HTML already in memory ─────────
         needing_keys = set(
             arango_repo.fetch_posts_needing_normalization(partition_key, NORMALIZATION_VERSION)
         )
-        context.log.info(f"[normalize] {len(needing_keys)} posts need normalization")
-
-        if not needing_keys:
-            return MaterializeResult(
-                metadata={
-                    "normalized": MetadataValue.int(0),
-                    "normalization_version": MetadataValue.int(NORMALIZATION_VERSION),
-                }
-            )
-
-        rows = postgres.get_repository().fetch_posts_with_html(page_url)
-        filtered = [r for r in rows if str(r.post_id_on_site) in needing_keys]
-
         patches: list[NormalizedPostDoc] = []
-        for row in filtered:
+        for row in rows:
+            if str(row.post_id_on_site) not in needing_keys:
+                continue
             normalized = normalize_post_html(row.raw_content_html or "")
             patches.append(
                 NormalizedPostDoc(
@@ -190,33 +111,39 @@ def build_thread_assets(
                     normalization_version=NORMALIZATION_VERSION,
                 )
             )
-
         arango_repo.update_post_normalizations(patches)
-        context.log.info(f"[normalize] wrote {len(patches)} patches")
+
+        context.log.info(
+            f"[build_posts] upserted={len(to_upsert)} skipped={skipped}"
+            f" edges={len(edges)} (dropped {dropped}) normalized={len(patches)}"
+        )
         return MaterializeResult(
             metadata={
+                "posts_in_postgres": MetadataValue.int(len(rows)),
+                "posts_upserted": MetadataValue.int(len(to_upsert)),
+                "posts_skipped_unchanged": MetadataValue.int(skipped),
+                "edges_dropped": MetadataValue.int(dropped),
+                "edges_inserted": MetadataValue.int(len(edges)),
                 "normalized": MetadataValue.int(len(patches)),
                 "normalization_version": MetadataValue.int(NORMALIZATION_VERSION),
             }
         )
 
-    normalize_posts = asset(
-        name="normalize_posts",
+    build_posts_layer = asset(
+        name="build_posts_layer",
         key_prefix=[thread_id],
         partitions_def=partitions_def,
         group_name=group,
         compute_kind="ArangoDB",
-        deps=[
-            AssetDep(
-                AssetKey([thread_id, "sync_posts_to_arango"]),
-                partition_mapping=IdentityPartitionMapping(),
-            )
-        ],
+        deps=[AssetDep(posts_asset_key, partition_mapping=IdentityPartitionMapping())],
         automation_condition=AutomationCondition.eager(),
-        description="HTML stripped; normalized_own_text populated. Staleness: normalization_version.",  # noqa: E501
-    )(_normalize_fn)
+        description=(
+            "Layer 1 posts (content-hash diffed from PostgreSQL) + explicit quote edges"
+            " + normalized_own_text, all from a single Postgres read."
+        ),
+    )(_build_posts_fn)
 
-    # ── 4. compute_embeddings ────────────────────────────────────────────────
+    # ── 2. compute_embeddings ────────────────────────────────────────────────
 
     def _embed_fn(
         context: AssetExecutionContext,
@@ -257,7 +184,7 @@ def build_thread_assets(
         compute_kind="OpenAI",
         deps=[
             AssetDep(
-                AssetKey([thread_id, "normalize_posts"]),
+                AssetKey([thread_id, "build_posts_layer"]),
                 partition_mapping=IdentityPartitionMapping(),
             )
         ],
@@ -266,7 +193,7 @@ def build_thread_assets(
         description="OpenAI text-embedding-3-small embeddings for normalized_own_text.",
     )(_embed_fn)
 
-    # ── 5. extract_company_mentions (classify + extract merged) ─────────────
+    # ── 3. extract_company_mentions (classify + extract merged) ─────────────
 
     def _mentions_fn(
         context: AssetExecutionContext,
@@ -291,23 +218,33 @@ def build_thread_assets(
                 f"[extract_mentions] enriched={llm_stats.enriched} errors={llm_stats.errors}"
             )
             if llm_stats.error_keys:
-                context.log.warning(
-                    f"[extract_mentions] failed keys: {llm_stats.error_keys[:10]}"
-                )
-
-        # Phase 2 — project mentions (always runs so re-runs recover failed writes)
-        raw_docs = arango_repo.fetch_extraction_results(partition_key, ENRICHMENT_VERSION)
-        result_docs = [ExtractionResultDoc.model_validate(d) for d in raw_docs]
-        non_noise = [d for d in result_docs if d.content_class in {"review", "rating", "event"}]
-
-        context.log.info(
-            f"[extract_mentions] total={len(result_docs)} eligible={len(non_noise)}"
-        )
+                context.log.warning(f"[extract_mentions] failed keys: {llm_stats.error_keys[:10]}")
 
         enriched_count = llm_stats.enriched if llm_stats else 0
         error_count = llm_stats.errors if llm_stats else 0
         req_tokens = llm_stats.request_tokens if llm_stats else 0
         res_tokens = llm_stats.response_tokens if llm_stats else 0
+
+        # Phase 2 — project mentions. Runs when Phase 1 enriched anything, or when
+        # no mentions exist yet for the partition (recovers a previously failed write).
+        # Skipped on no-op eager re-triggers to avoid churning ArangoDB.
+        mentions_exist = arango_repo.partition_has_mentions(partition_key)
+        if not (items or not mentions_exist):
+            context.log.info("[extract_mentions] Phase 2 skipped — nothing new, mentions exist")
+            return MaterializeResult(
+                metadata={
+                    "enriched": MetadataValue.int(enriched_count),
+                    "errors": MetadataValue.int(error_count),
+                    "enrichment_version": MetadataValue.int(ENRICHMENT_VERSION),
+                    "mention_docs": MetadataValue.text("unchanged"),
+                }
+            )
+
+        raw_docs = arango_repo.fetch_extraction_results(partition_key, ENRICHMENT_VERSION)
+        result_docs = [ExtractionResultDoc.model_validate(d) for d in raw_docs]
+        non_noise = [d for d in result_docs if d.content_class in {"review", "rating", "event"}]
+
+        context.log.info(f"[extract_mentions] total={len(result_docs)} eligible={len(non_noise)}")
 
         if not non_noise:
             return MaterializeResult(
@@ -354,7 +291,7 @@ def build_thread_assets(
         compute_kind="OpenAI",
         deps=[
             AssetDep(
-                AssetKey([thread_id, "normalize_posts"]),
+                AssetKey([thread_id, "build_posts_layer"]),
                 partition_mapping=IdentityPartitionMapping(),
             )
         ],
@@ -366,7 +303,7 @@ def build_thread_assets(
         ),
     )(_mentions_fn)
 
-    # ── 7. detect_implicit_replies ───────────────────────────────────────────
+    # ── 4. detect_implicit_replies ───────────────────────────────────────────
 
     def _implicit_fn(
         context: AssetExecutionContext,
@@ -404,12 +341,11 @@ def build_thread_assets(
         group_name=group,
         compute_kind="OpenAI",
         deps=[
+            # Explicit quote edges are written by build_posts_layer (a transitive
+            # ancestor of extract_company_mentions), so depending on the mentions
+            # asset alone guarantees the `already_linked` exclusion is correct.
             AssetDep(
                 AssetKey([thread_id, "extract_company_mentions"]),
-                partition_mapping=IdentityPartitionMapping(),
-            ),
-            AssetDep(
-                AssetKey([thread_id, "extract_explicit_edges"]),
                 partition_mapping=IdentityPartitionMapping(),
             ),
         ],
@@ -417,9 +353,7 @@ def build_thread_assets(
     )(_implicit_fn)
 
     return [
-        sync_posts_to_arango,
-        extract_explicit_edges,
-        normalize_posts,
+        build_posts_layer,
         compute_embeddings,
         extract_company_mentions,
         detect_implicit_replies,
