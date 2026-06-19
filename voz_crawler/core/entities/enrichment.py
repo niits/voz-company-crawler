@@ -2,8 +2,10 @@ from pydantic import BaseModel
 
 # Bump NORMALIZATION_VERSION to reprocess all posts through normalize_posts.
 # Bump ENRICHMENT_VERSION to reprocess all LLM enrichments (re-calls the LLM).
+# Bump RESOLUTION_VERSION to force a full re-resolution of company aliases.
 NORMALIZATION_VERSION = 1
 ENRICHMENT_VERSION = 1
+RESOLUTION_VERSION = 1
 
 
 class ContentClassification(BaseModel):

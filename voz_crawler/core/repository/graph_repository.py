@@ -8,6 +8,8 @@ from voz_crawler.core.entities.arango import (
 )
 from voz_crawler.core.entities.company import (
     AliasEvidenceDoc,
+    CompanyAliasDoc,
+    CompanyDoc,
     CompanyMentionDoc,
     MentionEdge,
 )
@@ -153,88 +155,6 @@ class GraphRepository:
 
     # ── Posts — Layer 2 normalization ────────────────────────────────────────
 
-    def fetch_posts_needing_preprocess(
-        self, partition_key: str, normalization_version: int, embedding_model: str
-    ) -> list[str]:
-        """Return _keys of posts needing normalization or re-embedding.
-
-        A post needs preprocess if:
-        - normalization_version is null or stale, OR
-        - normalization is current but embedding is missing or from a different model.
-        """
-        cursor = self._db.aql.execute(
-            "FOR p IN posts"
-            " FILTER p.partition_key == @pk"
-            "   AND ("
-            "     p.normalization_version == null"
-            "     OR p.normalization_version < @norm_ver"
-            "     OR ("
-            "       p.normalized_own_text != null"
-            "       AND LENGTH(p.normalized_own_text) >= 20"
-            "       AND (p.embedding == null OR p.embedding_model != @embed_model)"
-            "     )"
-            "   )"
-            " RETURN p._key",
-            bind_vars={
-                "pk": partition_key,
-                "norm_ver": normalization_version,
-                "embed_model": embedding_model,
-            },
-        )
-        return list(cursor)
-
-    def upsert_normalized_embedded(self, patches: list[NormalizedPostDoc]) -> None:
-        """Single bulk write for normalization + embedding fields together."""
-        if patches:
-            self._db.collection("posts").update_many(
-                [p.model_dump(by_alias=True, exclude_none=True) for p in patches]
-            )
-
-    def write_llm_results(
-        self,
-        partition_key: str,
-        extraction_docs: list[ExtractionResultDoc],
-        enrichment_patches: list[NormalizedPostDoc],
-        mention_docs,
-        mention_edges,
-        alias_evidence,
-    ) -> int:
-        """Single write boundary for all LLM-derived data.
-
-        Writes in dependency order: extraction_results → post patches →
-        drop old mention edges → company_mentions → mention_edges → alias_evidence.
-        Returns count of extraction docs written.
-        """
-        if extraction_docs:
-            self._db.collection("extraction_results").import_bulk(
-                [d.model_dump(by_alias=True) for d in extraction_docs],
-                on_duplicate="replace",
-            )
-        if enrichment_patches:
-            self._db.collection("posts").update_many(
-                [p.model_dump(by_alias=True, exclude_none=True) for p in enrichment_patches]
-            )
-        self._db.aql.execute(
-            "FOR e IN mentions FILTER e.partition_key == @pk REMOVE e IN mentions",
-            bind_vars={"pk": partition_key},
-        )
-        if mention_docs:
-            self._db.collection("company_mentions").import_bulk(
-                [d.model_dump(by_alias=True) for d in mention_docs],
-                on_duplicate="replace",
-            )
-        if mention_edges:
-            self._db.collection("mentions").import_bulk(
-                [e.model_dump(by_alias=True) for e in mention_edges],
-                on_duplicate="ignore",
-            )
-        if alias_evidence:
-            self._db.collection("alias_evidence").import_bulk(
-                [d.model_dump(by_alias=True) for d in alias_evidence],
-                on_duplicate="replace",
-            )
-        return len(extraction_docs)
-
     def fetch_posts_needing_normalization(
         self, partition_key: str, normalization_version: int
     ) -> list[str]:
@@ -339,6 +259,14 @@ class GraphRepository:
                 on_duplicate="replace",
             )
 
+    def partition_has_mentions(self, partition_key: str) -> bool:
+        """True if any company_mention vertex already exists for this partition."""
+        cursor = self._db.aql.execute(
+            "FOR m IN company_mentions FILTER m.partition_key == @pk LIMIT 1 RETURN 1",
+            bind_vars={"pk": partition_key},
+        )
+        return any(True for _ in cursor)
+
     def drop_mention_edges(self, partition_key: str) -> int:
         """Delete all mention edges for a partition. Returns count dropped."""
         result = self._db.aql.execute(
@@ -364,6 +292,37 @@ class GraphRepository:
                 [d.model_dump(by_alias=True) for d in docs],
                 on_duplicate="replace",
             )
+
+    # ── Company resolution (global, cross-thread) ─────────────────────────────
+
+    def fetch_all_alias_evidence(self) -> list[dict]:
+        """Return every alias_evidence record across all threads (resolution input)."""
+        return list(self._db.aql.execute("FOR e IN alias_evidence RETURN e"))
+
+    def fetch_all_company_mentions(self) -> list[dict]:
+        """Return every company_mention vertex across all threads (resolution input)."""
+        return list(self._db.aql.execute("FOR m IN company_mentions RETURN m"))
+
+    def upsert_companies(self, docs: list[CompanyDoc]) -> None:
+        """Upsert canonical company stubs. Replace keeps the latest canonical_name."""
+        if docs:
+            self._db.collection("companies").import_bulk(
+                [d.model_dump(by_alias=True) for d in docs],
+                on_duplicate="replace",
+            )
+
+    def upsert_company_aliases(self, docs: list[CompanyAliasDoc]) -> None:
+        """Upsert alias→company resolutions. Replace on each resolution pass."""
+        if docs:
+            self._db.collection("company_aliases").import_bulk(
+                [d.model_dump(by_alias=True) for d in docs],
+                on_duplicate="replace",
+            )
+
+    def patch_mention_resolutions(self, patches: list[dict]) -> None:
+        """Patch company_key / is_ambiguous / resolution_version on company_mentions."""
+        if patches:
+            self._db.collection("company_mentions").update_many(patches)
 
     # ── Quotes / explicit edges ───────────────────────────────────────────────
 

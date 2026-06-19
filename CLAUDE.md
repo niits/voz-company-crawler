@@ -23,15 +23,17 @@ voz_crawler/
     entities/
       raw_post.py         RawPost SQLModel (mirrors raw.voz__posts columns)
       arango.py           RawPostDoc, NormalizedPostDoc, ExtractionResultDoc, ArangoEdge
-      enrichment.py       NORMALIZATION_VERSION, ENRICHMENT_VERSION constants + enrichment types
+      company.py          CompanyMentionDoc, MentionEdge, CompanyDoc, CompanyAliasDoc, AliasEvidenceDoc
+      enrichment.py       NORMALIZATION_VERSION, ENRICHMENT_VERSION, RESOLUTION_VERSION + enrichment types
     graph/
       post_sync.py        build_upsert_docs — diff rows vs existing hashes
       edge_sync.py        build_edges — parse blockquotes into ArangoEdge list
       quote_parser.py     extract_quote_edges — BeautifulSoup XenForo quote parser
       normalizer.py       normalize_post_html — strip quoted blocks, return own_text
       embedding_sync.py   embed_batch — pure transform, returns list[EmbedPatch] (no DB write)
-      enrichment_sync.py  enrich_partition — pure LLM transform, returns list[ExtractionResultDoc]
+      enrichment_sync.py  run_llm_enrichment — pure LLM transform, returns ExtractionResultDocs
       company_sync.py     build_company_mention_docs — pure projection from ExtractionResultDocs
+      company_resolution.py  resolve — cross-thread alias→company resolution (pure transform)
       implicit_reply_sync.py  process_partition_implicit_replies — BM25+cosine+LLM implicit edges
     ingestion/
       html_source/
@@ -45,12 +47,14 @@ voz_crawler/
       ingestion.py        build_ingestion_assets(thread_id, partitions_def) factory
                             → per-thread @dlt_assets with key_prefix=[thread_id]
       reply_graph.py      build_thread_assets(thread_id, partitions_def, posts_asset_key) factory
-                            → 6 assets per thread: sync_posts_to_arango (@asset),
-                            extract_explicit_edges (@asset),
-                            normalize_posts (@asset),
+                            → 4 assets per thread: build_posts_layer (@asset,
+                            Layer 1 upsert + quote edges + normalization in one Postgres read),
                             compute_embeddings (@asset),
                             extract_company_mentions (@asset, classify+extract merged),
                             detect_implicit_replies (@asset, sensor-gated)
+      resolution.py       build_resolution_pipeline() → ONE global resolve_companies (@asset,
+                            unpartitioned, cross-thread) + resolve_companies_job + hourly schedule.
+                            NOT per-thread — sits outside the factory.
     jobs/
       ingestion.py        build_ingestion_jobs(thread_id, ...) factory
                             → discover_pages_job_{thread_id} + crawl_page_job_{thread_id}
@@ -145,35 +149,26 @@ On Cloudflare block (403/429/503), the asset raises `RuntimeError`. Safe — nex
 
 ## Reply Graph Pipeline
 
-Six assets per thread (in group `thread_{thread_id}`) run after each successful crawl partition. They form a diamond-shaped DAG: two fast parallel branches (`extract_explicit_edges` and `normalize_posts`) fan out from `sync_posts_to_arango`, then `normalize_posts` fans out again into a parallel embedding + enrichment pair.
+Four assets per thread (in group `thread_{thread_id}`) run after each successful crawl partition. `build_posts_layer` does all the cheap stateless work, then fans out into a parallel embedding + enrichment pair, which converge on the sensor-gated implicit-reply detector. (Consolidated from the earlier 7-asset topology — see design decision 17.)
 
 ### Asset execution order
 
 ```
-sync_posts_to_arango
-    ├── extract_explicit_edges          (branch A — fast, stateless)
-    └── normalize_posts
-            ├── compute_embeddings      (parallel with extract_company_mentions)
-            └── extract_company_mentions  (LLM classify + mention projection merged)
-                        └── detect_implicit_replies  (sensor-gated)
-                                    ▲
-                                    │ (also deps)
-                            extract_explicit_edges
+build_posts_layer   (Layer 1 upsert + quote edges + normalization, one Postgres read)
+    ├── compute_embeddings        (parallel with extract_company_mentions)
+    └── extract_company_mentions  (LLM classify + mention projection merged)
+                └── detect_implicit_replies  (sensor-gated)
 ```
 
 ### Asset descriptions
 
-**`sync_posts_to_arango`** `[@asset]` — reads `raw.voz__posts` for the page URL, diffs against existing ArangoDB documents by `content_hash`, upserts only changed/new posts. Changed posts have Layer 2 fields reset to null, propagating staleness to downstream enrichment.
+**`build_posts_layer`** `[@asset]` — single Postgres read of `raw.voz__posts` for the page URL (`fetch_posts_full`), then three stateless writes to ArangoDB: (1) **Layer 1** — diff rows against existing docs by `content_hash`, upsert only changed/new posts (changed posts have Layer 2 fields reset to null, propagating staleness downstream); (2) **quote edges** — re-parse XenForo `<blockquote>` HTML, drop existing `quotes` edges for the partition, re-insert fresh ones; (3) **normalization** — for posts with stale/missing `normalization_version` (`< NORMALIZATION_VERSION`), strip quoted blocks from the already-in-memory HTML and write `normalized_own_text` + `normalization_version`.
 
-**`extract_explicit_edges`** `[@asset]` — re-parses XenForo `<blockquote>` HTML, drops all existing `quotes` edges for the partition, re-inserts fresh edges. Runs concurrently with `normalize_posts`.
+**`compute_embeddings`** `[@asset]` — fetches posts with `normalized_own_text` but missing `embedding`, calls OpenAI `text-embedding-3-small`, writes `embedding` + `embedding_model`. Runs in parallel with `extract_company_mentions` after `build_posts_layer`.
 
-**`normalize_posts`** `[@asset]` — fetches posts with stale `normalization_version` from ArangoDB, reads raw HTML from PostgreSQL, strips quoted blocks, writes `normalized_own_text` + `normalization_version`. Staleness: `normalization_version < NORMALIZATION_VERSION`.
+**`extract_company_mentions`** `[@asset]` — merged classify + extract step. Phase 1: fetches posts with stale `enrichment_version`, runs LLM via PydanticAI to classify `content_class` and extract company mentions, writes `ExtractionResultDoc` + enrichment patches (`content_class`, `has_company_mention`, `enrichment_version`). Phase 2 (runs whenever Phase 1 enriched anything or no mentions exist yet, so re-runs recover failed writes without churning ArangoDB on no-op re-triggers): reads current `ExtractionResultDoc` from DB, filters to `content_class in {"review", "rating", "event"}`, projects `CompanyMentionDoc` + `MentionEdge` + `AliasEvidenceDoc`, drops and re-inserts mention data. Depends on `build_posts_layer`, runs in parallel with `compute_embeddings`.
 
-**`compute_embeddings`** `[@asset]` — fetches posts with `normalized_own_text` but missing `embedding`, calls OpenAI `text-embedding-3-small`, writes `embedding` + `embedding_model`. Runs in parallel with `classify_posts` after `normalize_posts`.
-
-**`extract_company_mentions`** `[@asset]` — merged classify + extract step. Phase 1: fetches posts with stale `enrichment_version`, runs LLM via PydanticAI to classify `content_class` and extract company mentions, writes `ExtractionResultDoc` + enrichment patches (`content_class`, `has_company_mention`, `enrichment_version`). Phase 2 (always runs, so re-runs recover failed writes): reads current `ExtractionResultDoc` from DB, filters to `content_class in {"review", "rating", "event"}`, projects `CompanyMentionDoc` + `MentionEdge` + `AliasEvidenceDoc`, drops and re-inserts mention data. Depends on `normalize_posts`, runs in parallel with `compute_embeddings`.
-
-**`detect_implicit_replies`** `[@asset]` — BM25 + cosine re-rank + PydanticAI agent to detect implicit reply edges. No `AutomationCondition.eager()` — triggered by `implicit_reply_sensor` only after all lower-numbered partitions have materialized `extract_company_mentions`. Depends on both `extract_company_mentions` AND `extract_explicit_edges` (explicit edges must exist before implicit detection so the `already_linked` exclusion is correct). Uses noise-aware adaptive window and passes `content_class` labels to the LLM for each candidate.
+**`detect_implicit_replies`** `[@asset]` — BM25 + cosine re-rank + PydanticAI agent to detect implicit reply edges. No `AutomationCondition.eager()` — triggered by `implicit_reply_sensor` only after all lower-numbered partitions have materialized `extract_company_mentions`. Depends on `extract_company_mentions` (whose ancestor `build_posts_layer` has already written the explicit quote edges, so the `already_linked` exclusion is correct). Uses a time/rate-based adaptive window (`compute_adaptive_window`). **Known gap:** design decision 16 specifies a *noise-aware* window and `content_class` labels passed to the LLM, but the current implementation is not yet content-class-aware — see decision 16.
 
 ### AutomationCondition
 
@@ -191,16 +186,40 @@ All assets except `detect_implicit_replies` use `AutomationCondition.eager()` wi
 | `NORMALIZATION_VERSION` | When to re-normalize post HTML |
 | `EMBEDDING_MODEL` | When to re-embed (model name change) |
 | `ENRICHMENT_VERSION` | When to re-run LLM classification |
+| `RESOLUTION_VERSION` | When to force a full re-resolution of company aliases |
+
+## Company Resolution Tier (global, cross-thread)
+
+A single unpartitioned `resolve_companies` asset (group `company_resolution`) runs **outside** the per-thread factory because aliases span threads — "nhà F" defined in one thread must resolve mentions everywhere. Triggered by `resolve_companies_schedule` (hourly), not by `AutomationCondition.eager()`.
+
+Each run is a full recompute: it reads all `alias_evidence` + all `company_mentions`, then (pure logic in `core/graph/company_resolution.py`):
+1. aggregates evidence per alias into ranked `CompanyAliasDoc.resolutions` (weighted by `EVIDENCE_TYPE_WEIGHTS`, saturated to [0,1]);
+2. flags `is_ambiguous` / `is_unresolved` / `best_company_key` per the alias model contract;
+3. stubs `CompanyDoc` entries (canonical_name = most frequent raw name per key);
+4. back-patches `company_mention.company_key` (alias resolution wins over the LLM's per-post `company_name`, with self-name fallback).
+
+Tunables live at the top of `company_resolution.py`: `EVIDENCE_TYPE_WEIGHTS`, `SCORE_SATURATION`, `AMBIGUITY_GAP`, `UNRESOLVED_THRESHOLD`. See design decision 18.
+
+### Crawling multiple threads
+
+Set `VOZ_THREAD_URLS` to a comma-separated list — `_build_thread_pipeline` runs once per URL, giving each thread its own isolated factory (partitions, jobs, sensors). The global `resolve_companies` asset then unifies company identities across all of them.
 
 ### ArangoDB Schema
 
 | Collection | Type | Purpose |
 |---|---|---|
-| `posts` | vertex | One document per forum post (`_key = post_id_on_site`) |
-| `quotes` | edge | XenForo explicit quote relationships |
-| `reply_graph` | named graph | ArangoDB graph wrapping posts → quotes → posts |
+| `posts` | vertex | One document per forum post (`_key = post_id_on_site`); holds Layer 1 + Layer 2 fields |
+| `extraction_results` | vertex | Persisted LLM output per post (`_key = {post_key}_{enrichment_version}`) |
+| `company_mentions` | vertex | One doc per (post, mention ordinal) projected from extraction results |
+| `companies` | vertex | Canonical company entities (manually seeded / auto-stubbed) |
+| `company_aliases` | vertex | Alias→company resolutions (ranked, ambiguity-aware) |
+| `alias_evidence` | vertex | Append-only evidence log backing alias resolution |
+| `quotes` | edge | Explicit (`html_metadata`) + implicit (`implicit_llm`) reply relationships, posts → posts |
+| `mentions` | edge | posts → company_mentions |
+| `reply_graph` | named graph | Wraps `posts → quotes → posts` and `posts → mentions → company_mentions` |
+| `reply_graph_search` | ArangoSearch view | BM25 text index over `posts.normalized_own_text` for implicit-reply candidate retrieval |
 
-Indexes: `partition_key` persistent index on both collections for partition-scoped queries.
+`ensure_schema()` (in `GraphRepository`) creates all of the above idempotently on every resource setup. Persistent indexes on `partition_key` (plus `company_key`, `resolution_version`, `alias_slug`, etc.) support partition-scoped and resolution queries.
 
 ## Adding dbt Models
 
