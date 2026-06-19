@@ -2,6 +2,35 @@
 
 Data pipeline crawling IT company reviews from the Voz.vn forum.
 
+## Working principles
+
+- **Think first.** State assumptions. If a request has multiple readings or a simpler approach exists, surface it before coding. When something is genuinely unclear, stop and ask.
+- **Simplicity.** Minimum code that solves the problem — no speculative features, abstractions for single-use code, configurability, or error handling for impossible cases. If 200 lines could be 50, rewrite it.
+- **Surgical changes.** Touch only what the task needs; match existing style; don't refactor or reformat unrelated code. Remove only the orphans your own change creates — flag pre-existing dead code instead of deleting it. Every changed line should trace to the request.
+- **Verify.** Turn tasks into checks ("fix the bug" → write a failing test, then make it pass; "refactor X" → tests green before and after) and confirm before and after.
+
+## Language
+
+- **English** for code, comments, docs, commit/PR/issue text, and brainstorm notes.
+- **Reply to the user in English** — the user is practicing English. If the user writes in Vietnamese, answer in English and add a one-line tip showing how the request reads in English.
+
+## Git workflow
+
+`main` is always stable. **Never commit directly to `main`** — branch for every change, then open a PR (see recent history: every change lands via a numbered PR).
+
+```bash
+git checkout main && git pull                # branch from up-to-date main
+git checkout -b <type>/<name>                # feat | fix | refactor | docs | chore
+git commit -m "<type>(<scope>): <desc>"      # Conventional Commits
+git push -u origin <type>/<name>
+gh pr create ...
+```
+
+- **Conventional Commits** for every commit (`feat·fix·refactor·docs·test·chore`), scope optional but encouraged (e.g. `refactor(reply-graph): ...`).
+- **PR body closes its issues** (`Closes #45`). After merge, note any root cause / edge cases / gotchas worth keeping on the issue.
+- **Non-trivial code changes ship with tests** — `uv run pytest` green before and after.
+- Commit or push **only when the user asks**.
+
 ## Stack
 
 | Layer | Tool |
