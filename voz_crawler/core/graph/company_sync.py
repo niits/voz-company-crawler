@@ -2,7 +2,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from voz_crawler.core.entities.arango import ExtractionResultDoc
-from voz_crawler.core.entities.company import AliasEvidenceDoc, CompanyMentionDoc, MentionEdge
+from voz_crawler.core.entities.company import (
+    AliasEvidenceDoc,
+    CompanyMentionDoc,
+    MentionEdge,
+)
 from voz_crawler.core.entities.enrichment import ENRICHMENT_VERSION
 
 

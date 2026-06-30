@@ -12,7 +12,7 @@ Architectural and implementation decisions for the Voz Company Crawler.
 - dlt handles schema creation, column type inference, upserts (`ON CONFLICT … DO UPDATE`), pipeline state, and load history out of the box — eliminating ~200 lines of boilerplate.
 - `write_disposition="merge"` + `primary_key` replaces hand-written `execute_values` + `ON CONFLICT` SQL.
 
-**Trade-off**: dlt owns the `raw` schema DDL, so table names follow dlt conventions (`voz__posts` with source prefix).
+**Trade-off**: dlt owns the `raw` schema DDL, so table names follow dlt conventions — the table is named after the **resource** (`posts`), giving `raw.posts` (no source-name prefix). Note this differs from the Dagster asset key `dlt_voz_posts`, which uses dagster-dlt's `dlt_{source}_{resource}` convention.
 
 ---
 
@@ -261,11 +261,11 @@ compute_embeddings   extract_company_mentions  [@asset]
 
 ### 15. PostgreSQL is retained as the source-of-truth raw store
 
-**Decision**: PostgreSQL (`raw.voz__posts`) is kept as the authoritative raw data store. All enrichment layers read from it as needed; ArangoDB holds derived data only.
+**Decision**: PostgreSQL (`raw.posts`) is kept as the authoritative raw data store. All enrichment layers read from it as needed; ArangoDB holds derived data only.
 
 **Rationale**:
 - dlt's `write_disposition="merge"` with `primary_key="post_id_on_site"` provides idempotent upsert semantics for free — rewriting this for direct ArangoDB ingestion would require significant custom logic.
-- PostgreSQL is the only recovery path: if ArangoDB data is corrupted or schema migrations are needed, the full graph can be re-derived from `raw.voz__posts` by replaying the enrichment pipeline.
+- PostgreSQL is the only recovery path: if ArangoDB data is corrupted or schema migrations are needed, the full graph can be re-derived from `raw.posts` by replaying the enrichment pipeline.
 - The cost of one SQL read per partition per enrichment op is negligible compared to OpenAI API latency.
 
 **ArangoDB role**: derived graph store. Post documents in ArangoDB are always reproducible from PostgreSQL + enrichment pipeline. ArangoDB should never be treated as a source of truth for raw post content.

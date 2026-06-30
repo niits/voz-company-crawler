@@ -21,7 +21,7 @@ Data pipeline crawling IT company reviews from the Voz.vn forum.
 voz_crawler/
   core/
     entities/
-      raw_post.py         RawPost SQLModel (mirrors raw.voz__posts columns)
+      raw_post.py         RawPost SQLModel (mirrors raw.posts columns)
       arango.py           RawPostDoc, NormalizedPostDoc, ExtractionResultDoc, ArangoEdge
       company.py          CompanyMentionDoc, MentionEdge, CompanyDoc, CompanyAliasDoc, AliasEvidenceDoc
       enrichment.py       NORMALIZATION_VERSION, ENRICHMENT_VERSION, RESOLUTION_VERSION + enrichment types
@@ -108,7 +108,9 @@ Key table (auto-created by dlt on first run):
 
 | Table | Primary key | Description |
 |---|---|---|
-| `raw.voz__posts` | `post_id_on_site` | One row per forum post, globally unique |
+| `raw.posts` | `post_id_on_site` | One row per forum post, globally unique |
+
+> Table name = `{PG_RAW_SCHEMA}.{PG_POSTS_TABLE}` (default `raw.posts`). dlt derives it from the **resource** name `posts` (in `dlt/sources/voz_thread.py`), *not* the source name `voz`. The Dagster **asset key**, by contrast, is `dlt_voz_posts` (dagster-dlt's `dlt_{source}_{resource}` convention) — a different identifier from the Postgres table.
 
 ## Crawl Strategy
 
@@ -121,10 +123,10 @@ Per-thread, two sensors work in tandem:
 2. Registers new keys `f"{thread_id}:{p}"` into `DynamicPartitionsDefinition(f"voz_pages_{thread_id}")`
 
 **`voz_crawl_sensor_{thread_id}`** (`run_status_sensor`, fires after `discover_pages_job_{thread_id}` succeeds):
-1. Checks Dagster's asset catalog for already-materialized partitions of `{thread_id}/voz__posts`
+1. Checks Dagster's asset catalog for already-materialized partitions of `{thread_id}/dlt_voz_posts`
 2. Queues `RunRequest` to `crawl_page_job_{thread_id}` for each unmaterialized page + the last page (always re-crawled daily)
 
-Each run materializes one partition → calls `voz_page_source(page_url)` → parses posts → merges into `raw.voz__posts` by `post_id_on_site`. No dlt cursor state needed.
+Each run materializes one partition → calls `voz_page_source(page_url)` → parses posts → merges into `raw.posts` by `post_id_on_site`. No dlt cursor state needed.
 
 On Cloudflare block (403/429/503), the asset raises `RuntimeError`. Safe — next sensor evaluation retries automatically.
 
@@ -162,7 +164,7 @@ build_posts_layer   (Layer 1 upsert + quote edges + normalization, one Postgres 
 
 ### Asset descriptions
 
-**`build_posts_layer`** `[@asset]` — single Postgres read of `raw.voz__posts` for the page URL (`fetch_posts_full`), then three stateless writes to ArangoDB: (1) **Layer 1** — diff rows against existing docs by `content_hash`, upsert only changed/new posts (changed posts have Layer 2 fields reset to null, propagating staleness downstream); (2) **quote edges** — re-parse XenForo `<blockquote>` HTML, drop existing `quotes` edges for the partition, re-insert fresh ones; (3) **normalization** — for posts with stale/missing `normalization_version` (`< NORMALIZATION_VERSION`), strip quoted blocks from the already-in-memory HTML and write `normalized_own_text` + `normalization_version`.
+**`build_posts_layer`** `[@asset]` — single Postgres read of `raw.posts` for the page URL (`fetch_posts_full`), then three stateless writes to ArangoDB: (1) **Layer 1** — diff rows against existing docs by `content_hash`, upsert only changed/new posts (changed posts have Layer 2 fields reset to null, propagating staleness downstream); (2) **quote edges** — re-parse XenForo `<blockquote>` HTML, drop existing `quotes` edges for the partition, re-insert fresh ones; (3) **normalization** — for posts with stale/missing `normalization_version` (`< NORMALIZATION_VERSION`), strip quoted blocks from the already-in-memory HTML and write `normalized_own_text` + `normalization_version`.
 
 **`compute_embeddings`** `[@asset]` — fetches posts with `normalized_own_text` but missing `embedding`, calls OpenAI `text-embedding-3-small`, writes `embedding` + `embedding_model`. Runs in parallel with `extract_company_mentions` after `build_posts_layer`.
 
