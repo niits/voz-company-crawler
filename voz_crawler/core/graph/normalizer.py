@@ -25,6 +25,10 @@ def normalize_post_html(html: str) -> dict:
     quoted_blocks = []
 
     for blockquote in soup.select("blockquote[data-source]"):
+        if blockquote.decomposed:
+            # Nested quote (quote-of-a-quote): already torn down when its
+            # parent blockquote was decompose()'d earlier in this loop.
+            continue
         author_raw = blockquote.get("data-quote", None) or None
         source_raw = blockquote.get("data-source", "")  # e.g. "post: 21997699"
         source_post_id = None
