@@ -2,6 +2,13 @@ import re
 
 from bs4 import BeautifulSoup
 
+# XenForo UI chrome that carries no post content of its own:
+# - .bbCodeBlock-title: "<author> said:" quote attribution, but also reused
+#   for non-quote blocks like code-block language labels (e.g. "PHP:")
+# - .bbCodeBlock-expandLink: the "Click to expand..." quote trigger
+# - .bbCodeSpoiler-button: the "Spoiler: <title>" toggle button
+_CHROME_SELECTOR = ".bbCodeBlock-title, .bbCodeBlock-expandLink, .bbCodeSpoiler-button"
+
 
 def normalize_post_html(html: str) -> dict:
     """Parse XenForo post HTML and separate author's own text from quoted blocks.
@@ -22,6 +29,13 @@ def normalize_post_html(html: str) -> dict:
     Emote codes (e.g. :sweat:) are removed from own_text.
     """
     soup = BeautifulSoup(html, "lxml")
+
+    # Strip UI chrome first, on the whole tree, so neither quoted_blocks nor
+    # own_text ever pick it up regardless of where it's nested (quotes,
+    # spoilers, and code blocks can all contain each other).
+    for chrome in soup.select(_CHROME_SELECTOR):
+        chrome.decompose()
+
     quoted_blocks = []
 
     for blockquote in soup.select("blockquote[data-source]"):
