@@ -1,6 +1,6 @@
 import dlt
 from dagster import AssetExecutionContext, AssetKey, AssetSpec, DynamicPartitionsDefinition
-from dagster_dlt import DagsterDltTranslator, DagsterDltResource, dlt_assets
+from dagster_dlt import DagsterDltResource, DagsterDltTranslator, dlt_assets
 
 from voz_crawler.core.ingestion.html_source.pagination import build_page_url
 from voz_crawler.defs.resources.crawler_resource import CrawlerResource
@@ -25,7 +25,7 @@ def build_ingestion_assets(thread_id: str, partitions_def: DynamicPartitionsDefi
     """Returns a @dlt_assets definition scoped to a single thread.
 
     Uses DagsterDltTranslator to inject thread_id as key prefix so asset keys are
-    unique across threads (e.g. AssetKey([thread_id, "voz__posts"])).
+    unique across threads (e.g. AssetKey([thread_id, "dlt_voz_posts"])).
     pipeline_name is also scoped per thread to avoid dlt state collisions.
     """
     placeholder_source = voz_page_source(

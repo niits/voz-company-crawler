@@ -12,7 +12,7 @@ Architectural and implementation decisions for the Voz Company Crawler.
 - dlt handles schema creation, column type inference, upserts (`ON CONFLICT … DO UPDATE`), pipeline state, and load history out of the box — eliminating ~200 lines of boilerplate.
 - `write_disposition="merge"` + `primary_key` replaces hand-written `execute_values` + `ON CONFLICT` SQL.
 
-**Trade-off**: dlt owns the `raw` schema DDL, so table names follow dlt conventions (`voz__posts` with source prefix).
+**Trade-off**: dlt owns the `raw` schema DDL, so table names follow dlt conventions — the table is named after the **resource** (`posts`), giving `raw.posts` (no source-name prefix). Note this differs from the Dagster asset key `dlt_voz_posts`, which uses dagster-dlt's `dlt_{source}_{resource}` convention.
 
 ---
 
@@ -261,11 +261,11 @@ compute_embeddings   extract_company_mentions  [@asset]
 
 ### 15. PostgreSQL is retained as the source-of-truth raw store
 
-**Decision**: PostgreSQL (`raw.voz__posts`) is kept as the authoritative raw data store. All enrichment layers read from it as needed; ArangoDB holds derived data only.
+**Decision**: PostgreSQL (`raw.posts`) is kept as the authoritative raw data store. All enrichment layers read from it as needed; ArangoDB holds derived data only.
 
 **Rationale**:
 - dlt's `write_disposition="merge"` with `primary_key="post_id_on_site"` provides idempotent upsert semantics for free — rewriting this for direct ArangoDB ingestion would require significant custom logic.
-- PostgreSQL is the only recovery path: if ArangoDB data is corrupted or schema migrations are needed, the full graph can be re-derived from `raw.voz__posts` by replaying the enrichment pipeline.
+- PostgreSQL is the only recovery path: if ArangoDB data is corrupted or schema migrations are needed, the full graph can be re-derived from `raw.posts` by replaying the enrichment pipeline.
 - The cost of one SQL read per partition per enrichment op is negligible compared to OpenAI API latency.
 
 **ArangoDB role**: derived graph store. Post documents in ArangoDB are always reproducible from PostgreSQL + enrichment pipeline. ArangoDB should never be treated as a source of truth for raw post content.
@@ -330,4 +330,20 @@ Example: `adaptive_n=3`, posts before target = `[A(review), noise, B(question), 
 | `RESOLUTION_VERSION` | 1 | Bump to force a full re-resolution |
 
 **Trade-off / scope**: each run is a full recompute (reads all evidence + all mentions, rewrites aliases/companies, bulk-patches mentions). `alias_evidence` is small (only alias-defining posts), so recompute is cheap; `company_mention` patching is the larger write but bulk `update_many` handles it. Incremental resolution (by `resolution_version`) is a future optimization, deliberately deferred for correctness simplicity.
+
+---
+
+### 19. Re-evaluated: ArangoDB vs. storing edges in PostgreSQL
+
+**Question**: Now that the reply graph is mostly quote edges plus a few LLM-derived collections, would a self-referencing PostgreSQL table (`parent_post_id` FK + recursive CTE) be simpler than running ArangoDB?
+
+**Findings**:
+- If the only requirement were the `quotes` edge set, yes — XenForo quote chains are shallow, so a `parent_post_id` FK + `WITH RECURSIVE` CTE would express multi-hop traversal without extra infrastructure.
+- But `detect_implicit_replies` (decision 16) needs BM25 full-text ranking *and* graph traversal combined in a single query: `fetch_implicit_reply_candidates` (`graph_repository.py:366-409`) runs one AQL statement that does `GRAPH "reply_graph"` traversal for the `already_linked` exclusion *and* `ArangoSearch`/`BM25()` ranking over `normalized_own_text` in the same pass. Reproducing this on Postgres needs `tsvector`/`pg_trgm` for text ranking *plus* a recursive CTE for the traversal exclusion — two extensions bolted together, not fewer moving parts.
+- Decision 11 already earmarks ArangoDB's built-in vector index for future embedding similarity search on `posts.embedding`. Doing that on Postgres would add `pgvector` as a third extension alongside the two above.
+- The LLM-derived collections (`ExtractionResultDoc`, `CompanyMentionDoc`, `CompanyAliasDoc` with its nested `resolutions` list) are semi-structured and change shape as prompts evolve. They map directly onto ArangoDB documents; on Postgres they'd need either JSONB columns (losing typed indexes on nested fields) or normalized tables that need a migration every time the extraction schema changes.
+
+**Decision**: Keep ArangoDB. Edge storage alone would be replicable in Postgres, but the actual drivers are the combined BM25+traversal query in `detect_implicit_replies` and the semi-structured LLM output — dropping ArangoDB would mean re-assembling full-text search, graph traversal, and (eventually) vector search as three separate Postgres extensions instead of one system that already does all three together.
+
+**Trade-off accepted**: ArangoDB stays a required infrastructure dependency (decision 11) largely to support the search+traversal combination used by `detect_implicit_replies`. If that asset is ever simplified to pure temporal windowing (no BM25 ranking), this decision should be revisited — the case for Postgres-only edges gets much stronger once that query disappears.
 

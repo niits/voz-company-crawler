@@ -11,8 +11,8 @@ class RawRepository:
     The engine lifecycle (create/dispose) is managed by PostgresResource.
 
     The target table is injected at construction time so the class stays free
-    of any hard-coded table names; dlt-generated names (e.g. voz__posts) are
-    resolved by the resource configuration.
+    of any hard-coded table names; the dlt-generated name (default `posts`, from
+    the resource name) is resolved by the resource configuration.
     """
 
     def __init__(self, engine: Engine, schema: str, table: str) -> None:
