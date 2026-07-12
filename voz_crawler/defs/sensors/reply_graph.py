@@ -1,21 +1,27 @@
 from dagster import (
     AssetKey,
     DefaultSensorStatus,
-    DynamicPartitionsDefinition,
     MultiAssetSensorEvaluationContext,
     RunRequest,
     SensorResult,
     multi_asset_sensor,
 )
 
+# How many immediately preceding partitions must have materialized
+# extract_company_mentions before a partition's detect_implicit_replies can run.
+# Bounded (not "all history") so one permanently-stuck early page can't block
+# implicit-reply detection on every later page forever. Matches
+# fetch_thread_window_posts's cross-page candidate lookback in implicit_reply_sync.py —
+# most implicit replies land within 1-2 pages, so this is a deliberate liveness/recall
+# trade-off, not a hard correctness guarantee for replies further back.
+PRECEDING_PARTITIONS_REQUIRED = 2
+
 
 def build_implicit_sensor(
     thread_id: str,
     implicit_job,
-    partitions_def: DynamicPartitionsDefinition,
 ):
     extract_mentions_key = AssetKey([thread_id, "extract_company_mentions"])
-    partition_name = partitions_def.name
 
     @multi_asset_sensor(
         name=f"implicit_reply_sensor_{thread_id}",
@@ -24,8 +30,9 @@ def build_implicit_sensor(
         default_status=DefaultSensorStatus.RUNNING,
         minimum_interval_seconds=30,
         description=(
-            f"Triggers detect_implicit_replies for thread {thread_id} once all "
-            "lower-numbered partitions have materialized extract_company_mentions."
+            f"Triggers detect_implicit_replies for thread {thread_id} once the "
+            f"{PRECEDING_PARTITIONS_REQUIRED} immediately preceding partition(s) have "
+            "materialized extract_company_mentions."
         ),
     )
     def implicit_sensor(context: MultiAssetSensorEvaluationContext) -> SensorResult:
@@ -36,19 +43,21 @@ def build_implicit_sensor(
         all_materialized: set[str] = set(
             context.instance.get_materialized_partitions(extract_mentions_key)
         )
-        all_known: list[str] = sorted(
-            context.instance.get_dynamic_partitions(partition_name),
-            key=lambda k: int(k.rsplit(":", 1)[1]),
-        )
 
         run_requests: list[RunRequest] = []
         triggered: list[str] = []
 
         for partition_key in new_events:
             page_num = int(partition_key.rsplit(":", 1)[1])
-            preceding = [k for k in all_known if int(k.rsplit(":", 1)[1]) < page_num]
+            # Exact page-number arithmetic, not "last N registered partitions" —
+            # page 4 must specifically have pages 2 and 3 done, contiguous by page
+            # number, regardless of registration order or any gaps in all_known.
+            required = [
+                f"{thread_id}:{n}"
+                for n in range(max(1, page_num - PRECEDING_PARTITIONS_REQUIRED), page_num)
+            ]
 
-            if all(p in all_materialized for p in preceding):
+            if all(p in all_materialized for p in required):
                 run_requests.append(
                     RunRequest(
                         run_key=f"implicit-{partition_key}",
@@ -57,10 +66,10 @@ def build_implicit_sensor(
                 )
                 triggered.append(partition_key)
             else:
-                missing = [p for p in preceding if p not in all_materialized]
+                missing = [p for p in required if p not in all_materialized]
                 context.log.info(
                     f"[implicit_reply_sensor_{thread_id}] skipping {partition_key!r} — "
-                    f"{len(missing)} preceding partition(s) not yet enriched: {missing[:5]}"
+                    f"required preceding partition(s) not yet enriched: {missing}"
                 )
 
         context.advance_all_cursors()

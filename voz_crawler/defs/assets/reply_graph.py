@@ -348,6 +348,12 @@ def build_thread_assets(
                 AssetKey([thread_id, "extract_company_mentions"]),
                 partition_mapping=IdentityPartitionMapping(),
             ),
+            # Candidate reranking reads posts.embedding (fetch_thread_window_posts
+            # filters embedding != null), so this must wait on compute_embeddings too.
+            AssetDep(
+                AssetKey([thread_id, "compute_embeddings"]),
+                partition_mapping=IdentityPartitionMapping(),
+            ),
         ],
         op_tags={"dagster/concurrency_key": "voz_llm"},
     )(_implicit_fn)

@@ -18,6 +18,7 @@ def build_ingestion_jobs(
     @job(
         name=f"discover_pages_job_{thread_id}",
         description=f"Discover new pages for thread {thread_id} and register as partitions.",
+        tags={"dagster/concurrency_key": "voz_crawl"},
     )
     def discover_job():
         discover_op()
