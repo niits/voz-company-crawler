@@ -26,6 +26,7 @@ from voz_crawler.core.graph.post_sync import build_upsert_docs
 from voz_crawler.core.ingestion.html_source.pagination import build_page_url
 from voz_crawler.defs.resources.arango_resource import ArangoDBResource
 from voz_crawler.defs.resources.crawler_resource import CrawlerResource
+from voz_crawler.defs.resources.langfuse_resource import LangfuseResource
 from voz_crawler.defs.resources.postgres_resource import PostgresResource
 
 
@@ -149,6 +150,7 @@ def build_thread_assets(
         context: AssetExecutionContext,
         arango: ArangoDBResource,
         openai: OpenAIResource,
+        langfuse: LangfuseResource,
     ) -> MaterializeResult:
         partition_key = context.partition_key
         arango_repo = arango.get_repository()
@@ -165,7 +167,9 @@ def build_thread_assets(
             )
 
         with openai.get_client(context) as client:
-            embed_patches = embed_batch(client, items)
+            embed_patches = embed_batch(
+                client, items, partition_key=partition_key, langfuse=langfuse.get_client()
+            )
 
         arango_repo.update_post_embeddings(embed_patches)
         context.log.info(f"[embed] wrote {len(embed_patches)} patches")
@@ -199,6 +203,7 @@ def build_thread_assets(
         context: AssetExecutionContext,
         arango: ArangoDBResource,
         openai: OpenAIResource,
+        langfuse: LangfuseResource,
     ) -> MaterializeResult:
         partition_key = context.partition_key
         arango_repo = arango.get_repository()
@@ -210,7 +215,7 @@ def build_thread_assets(
         llm_stats = None
         if items:
             extraction_docs, enrichment_patches, llm_stats = run_llm_enrichment(
-                items, openai.api_key, partition_key
+                items, openai.api_key, partition_key, langfuse=langfuse.get_client()
             )
             arango_repo.upsert_extraction_results(extraction_docs)
             arango_repo.patch_post_enrichment_fields(enrichment_patches)
@@ -309,6 +314,7 @@ def build_thread_assets(
         context: AssetExecutionContext,
         arango: ArangoDBResource,
         openai: OpenAIResource,
+        langfuse: LangfuseResource,
     ) -> MaterializeResult:
         partition_key = context.partition_key
         context.log.info(f"[detect_implicit_replies] partition={partition_key!r}")
@@ -316,7 +322,9 @@ def build_thread_assets(
         arango_repo = arango.get_repository()
 
         with openai.get_client(context):
-            stats = process_partition_implicit_replies(arango_repo, openai.api_key, partition_key)
+            stats = process_partition_implicit_replies(
+                arango_repo, openai.api_key, partition_key, langfuse=langfuse.get_client()
+            )
 
         context.log.info(
             f"[detect_implicit_replies] processed={stats.posts_processed}"
