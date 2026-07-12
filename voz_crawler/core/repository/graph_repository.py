@@ -356,20 +356,25 @@ class GraphRepository:
 
     def fetch_implicit_reply_candidates(
         self,
-        partition_key: str,
         source_key: str,
         source_text: str,
+        candidate_keys: list[str],
         window_keys: list[str],
         top_n: int = 5,
-        min_emb_sim: float = 0.65,
     ) -> list[dict]:
         """Combined AQL query over reply_graph_search: BM25 + window boost.
 
-        Excludes posts already connected to source_key in reply_graph (any direction).
-        Returns top_n candidates sorted by combined score.
+        `candidate_keys` bounds the search to posts already fetched by
+        `fetch_thread_window_posts` (same thread, within the adaptive lookback,
+        strictly earlier than source_key) — this both scopes the BM25 search and
+        guarantees every candidate precedes the source in time, even across page
+        boundaries. Excludes posts already connected to source_key in reply_graph
+        (any direction). Returns top_n candidates sorted by combined score.
         Note: cosine similarity scoring is done in Python after fetching candidates
         (ArangoDB COSINE_SIMILARITY requires Enterprise edition).
         """
+        if not candidate_keys:
+            return []
         cursor = self._db.aql.execute(
             """
             LET already_linked = (
@@ -382,8 +387,7 @@ class GraphRepository:
                 p.normalized_own_text IN TOKENS(@source_text, @analyzer),
                 @analyzer
               )
-                AND p.partition_key == @pk
-                AND p._key != @source_key
+                AND p._key IN @candidate_keys
                 AND p._key NOT IN already_linked
               LET bm25 = BM25(p)
               LET window_boost = p._key IN @window_keys ? 0.2 : 0.0
@@ -401,9 +405,9 @@ class GraphRepository:
               }
             """,
             bind_vars={
-                "pk": partition_key,
                 "source_key": source_key,
                 "source_text": source_text,
+                "candidate_keys": candidate_keys,
                 "window_keys": window_keys,
                 "top_n": top_n,
                 "analyzer": self._text_analyzer(),
@@ -411,18 +415,44 @@ class GraphRepository:
         )
         return list(cursor)
 
-    def fetch_partition_posts_for_implicit_reply(self, partition_key: str) -> list[dict]:
-        """Return all posts for a partition sorted by posted_at, for window computation."""
+    def fetch_thread_window_posts(
+        self,
+        thread_id: str,
+        target_partition_key: str,
+        max_lookback_hours: float,
+    ) -> list[dict]:
+        """Return posts across the whole thread from `max_lookback_hours` before
+        the target partition through the target partition itself, sorted by
+        posted_at. Spans page boundaries so a reply on page N can be matched
+        against candidates on page N-1 — the per-post adaptive window (see
+        `get_window_keys`) then narrows this superset further.
+        """
         cursor = self._db.aql.execute(
-            "FOR p IN posts"
-            " FILTER p.partition_key == @pk"
-            "   AND p.normalized_own_text != null"
-            "   AND p.embedding != null"
-            " SORT p.posted_at ASC"
-            " RETURN {key: p._key, text: p.normalized_own_text,"
-            "         posted_at: p.posted_at, embedding: p.embedding,"
-            "         partition_key: p.partition_key}",
-            bind_vars={"pk": partition_key},
+            """
+            LET target_range = (
+              FOR p IN posts
+                FILTER p.partition_key == @pk
+                RETURN p.posted_at
+            )
+            LET t_max = MAX(target_range)
+            LET t_min = DATE_SUBTRACT(MIN(target_range), @lookback_hours, "hours")
+            FOR p IN posts
+              FILTER STARTS_WITH(p.partition_key, @thread_prefix)
+                AND p.normalized_own_text != null
+                AND p.embedding != null
+                AND p.posted_at != null
+                AND p.posted_at <= t_max
+                AND p.posted_at >= t_min
+              SORT p.posted_at ASC
+              RETURN {key: p._key, text: p.normalized_own_text,
+                      posted_at: p.posted_at, embedding: p.embedding,
+                      partition_key: p.partition_key}
+            """,
+            bind_vars={
+                "pk": target_partition_key,
+                "thread_prefix": f"{thread_id}:",
+                "lookback_hours": max_lookback_hours,
+            },
         )
         return list(cursor)
 

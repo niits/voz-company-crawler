@@ -116,22 +116,31 @@ def process_partition_implicit_replies(
         model_settings={"temperature": 0},
     )
 
-    posts = repo.fetch_partition_posts_for_implicit_reply(partition_key)
+    thread_id = partition_key.split(":", 1)[0]
+    posts = repo.fetch_thread_window_posts(thread_id, partition_key, MAX_LOOKBACK_H)
     stats = ImplicitReplyStats()
 
     if len(posts) < 2:
         return stats
 
+    # `posts` spans this partition plus lookback context from earlier pages.
+    # Only posts belonging to this partition are sources to process; earlier
+    # pages' posts are candidate-pool-only (already processed in their own run).
+    target_indices = [i for i, p in enumerate(posts) if p["partition_key"] == partition_key]
+
     edges_to_insert: list[ArangoEdge] = []
 
-    for idx in range(1, len(posts)):
+    for idx in target_indices:
+        if idx == 0:
+            continue
         src = posts[idx]
         try:
             window_keys = get_window_keys(posts, idx)
+            candidate_keys = [p["key"] for p in posts[:idx]]
             raw_candidates = repo.fetch_implicit_reply_candidates(
-                partition_key=partition_key,
                 source_key=src["key"],
                 source_text=src["text"],
+                candidate_keys=candidate_keys,
                 window_keys=window_keys,
                 top_n=TOP_N_CANDIDATES * 2,  # over-fetch before embedding re-rank
             )

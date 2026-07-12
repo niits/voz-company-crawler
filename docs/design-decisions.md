@@ -74,7 +74,7 @@ Each `_build_thread_pipeline(thread_id)` creates:
    - Historical pages: `run_key=f"page-{N}"` — stable, fires once
    - Last page: `run_key=f"page-{N}-{YYYY-MM-DD}"` — re-fires daily
 
-**Concurrency**: `dagster/concurrency_key` is global across all threads. Tags `voz_llm` and `voz_crawl` throttle total concurrent LLM calls and crawl runs across all threads — this is the desired behavior (shared budget, not per-thread budget).
+**Concurrency**: `dagster/concurrency_key` is global across all threads. The instance-wide `max_concurrent_runs` is 20 (`docker/dev/dagster.docker.yaml`); `voz_crawl` (both `discover_pages_job_{t}` and `crawl_page_job_{t}` — both call FlareSolverr directly) is additionally capped at 1 concurrent run via `tag_concurrency_limits`, since FlareSolverr is a single headless-Chrome sidecar that can't usefully serve parallel requests. `voz_llm`-tagged and untagged runs share the remaining budget up to the 20 global cap — this is the desired behavior (one shared FlareSolverr budget, everything else scales).
 
 **Global merge step (implemented)**: The cross-thread `resolve_companies` asset is unpartitioned, runs outside this factory, and aggregates all threads' alias evidence. It is not coupled to the per-thread crawl pipeline — see decision 18.
 
@@ -288,7 +288,7 @@ Example: `adaptive_n=3`, posts before target = `[A(review), noise, B(question), 
 - System prompt rule: noise candidates should only be linked if the source post is clearly and directly responding to that specific noise post (e.g. requesting the user to stop spamming, questioning the reaction). Temporal proximity alone is not sufficient.
 
 **`content_class` availability**:
-- `content_class` is written to the `posts` collection by `classify_posts` (via `NormalizedPostDoc` patch). `fetch_partition_posts_for_implicit_reply` now returns it alongside `key`, `text`, `posted_at`, `embedding`, and `partition_key`.
+- `content_class` is written to the `posts` collection by `classify_posts` (via `NormalizedPostDoc` patch). `fetch_thread_window_posts` (renamed/widened in decision 20) would need to return it alongside `key`, `text`, `posted_at`, `embedding`, and `partition_key` — not yet done, see the "Known gap" note in `CLAUDE.md`.
 - Posts not yet enriched (e.g. very short posts below the 20-char threshold) have `content_class = null`; the window and LLM treat these as `"unknown"`, not noise.
 
 ### 10. PostgreSQL connection management: max_connections=300 + engine disposal
@@ -346,4 +346,17 @@ Example: `adaptive_n=3`, posts before target = `[A(review), noise, B(question), 
 **Decision**: Keep ArangoDB. Edge storage alone would be replicable in Postgres, but the actual drivers are the combined BM25+traversal query in `detect_implicit_replies` and the semi-structured LLM output — dropping ArangoDB would mean re-assembling full-text search, graph traversal, and (eventually) vector search as three separate Postgres extensions instead of one system that already does all three together.
 
 **Trade-off accepted**: ArangoDB stays a required infrastructure dependency (decision 11) largely to support the search+traversal combination used by `detect_implicit_replies`. If that asset is ever simplified to pure temporal windowing (no BM25 ranking), this decision should be revisited — the case for Postgres-only edges gets much stronger once that query disappears.
+
+---
+
+### 20. Cross-page candidate window + bounded partition gating for `detect_implicit_replies`
+
+**Problem found**: `implicit_reply_sensor_{thread_id}` gated a partition's `detect_implicit_replies` run on *every* preceding partition (all the way back to page 1) having materialized `extract_company_mentions`. But `fetch_implicit_reply_candidates`/`fetch_partition_posts_for_implicit_reply` filtered `partition_key == @pk` — the detector only ever searched within the *current page*, never using any of the history it was waiting on. Two consequences: (1) the gate was pure overhead with no correctness benefit, and (2) it was a liveness hazard — one permanently-stuck early page (crawl failure, persistent LLM error) would block implicit-reply detection on every later page forever. Separately, `detect_implicit_replies` reads `posts.embedding` (via the `embedding != null` filter) but had no `AssetDep` on `compute_embeddings` — only on `extract_company_mentions`, which runs in parallel with it — so a slow embedding backfill could silently starve candidates for a partition with no re-trigger.
+
+**Fix**:
+1. **Real cross-page window**: `fetch_thread_window_posts(thread_id, target_partition_key, max_lookback_hours)` (replaces `fetch_partition_posts_for_implicit_reply`) fetches posts across the whole thread (`STARTS_WITH(p.partition_key, "{thread_id}:")`) within `MAX_LOOKBACK_H` (168h) of the target partition's time range, not just the target partition. `process_partition_implicit_replies` runs the existing per-post adaptive window (`get_window_keys`, unchanged) over this wider set, so a reply on page N can now match a candidate on page N-1. `fetch_implicit_reply_candidates` takes an explicit `candidate_keys` list (every post strictly before the source in the fetched window) instead of a `partition_key` filter — this also incidentally fixes a latent bug where BM25 recall could surface same-page posts that came *after* the source in time.
+2. **Bounded gate, not "all history"**: `implicit_reply_sensor_{thread_id}` now requires only `PRECEDING_PARTITIONS_REQUIRED` (2) immediately preceding pages by exact page-number arithmetic — page 4 requires page 2 and 3 specifically, not "whatever the last 2 registered partitions happen to be." This is a deliberate liveness/recall trade-off: most implicit replies land within 1-2 pages of the source, and a stuck page more than 2 pages back no longer blocks everything downstream. Correctness for replies further back than the gate is not guaranteed — traded for liveness.
+3. **Wired the missing dependency**: `detect_implicit_replies` now also declares `AssetDep` on `compute_embeddings` (previously only `extract_company_mentions`), matching the documented convergence diagram in `CLAUDE.md` and the actual data it reads.
+
+**Trade-off**: the bounded gate (2) is not a hard correctness guarantee — a real implicit reply spanning 3+ pages back (rare, but possible in slow-moving threads) could be missed if the sensor fires before that page is enriched. Widening `PRECEDING_PARTITIONS_REQUIRED` trades liveness for recall; the constant is isolated at the top of `defs/sensors/reply_graph.py` for easy tuning.
 

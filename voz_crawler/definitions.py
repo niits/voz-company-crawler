@@ -49,7 +49,7 @@ def _build_thread_pipeline(thread_id: str) -> tuple[list, list, list]:
     # ── Reply graph layer ────────────────────────────────────────────────────
     reply_assets = build_thread_assets(thread_id, partitions_def, posts_asset_key)
     reply_graph_job, implicit_job = build_thread_jobs(thread_id, partitions_def, posts_asset_key)
-    implicit_sensor = build_implicit_sensor(thread_id, implicit_job, partitions_def)
+    implicit_sensor = build_implicit_sensor(thread_id, implicit_job)
 
     return (
         [ingestion_assets, *reply_assets],
