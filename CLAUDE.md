@@ -42,6 +42,7 @@ gh pr create ...
 | Embeddings | OpenAI `text-embedding-3-small` |
 | HTTP / CF bypass | FlareSolverr (Chrome headless sidecar) |
 | Transformation | dbt (scaffold ready) |
+| Observability | Langfuse Cloud (OTEL via pydantic_ai `Agent.instrument_all()`) |
 | Dependency mgmt | uv |
 
 ## Project Layout
@@ -177,6 +178,9 @@ On Cloudflare block (403/429/503), the asset raises `RuntimeError`. Safe — nex
 | `ARANGO_USER` | — | ArangoDB username |
 | `ARANGO_PASSWORD` | — | ArangoDB password |
 | `OPENAI_API_KEY` | — | OpenAI API key for embedding computation |
+| `LANGFUSE_PUBLIC_KEY` | — | Langfuse Cloud project public key |
+| `LANGFUSE_SECRET_KEY` | — | Langfuse Cloud project secret key |
+| `LANGFUSE_BASE_URL` | — | Langfuse Cloud region host, e.g. `https://jp.cloud.langfuse.com` (not `LANGFUSE_HOST`, the legacy name) |
 
 ## Reply Graph Pipeline
 
@@ -200,6 +204,10 @@ build_posts_layer   (Layer 1 upsert + quote edges + normalization, one Postgres 
 **`extract_company_mentions`** `[@asset]` — merged classify + extract step. Phase 1: fetches posts with stale `enrichment_version`, runs LLM via PydanticAI to classify `content_class` and extract company mentions, writes `ExtractionResultDoc` + enrichment patches (`content_class`, `has_company_mention`, `enrichment_version`). Phase 2 (runs whenever Phase 1 enriched anything or no mentions exist yet, so re-runs recover failed writes without churning ArangoDB on no-op re-triggers): reads current `ExtractionResultDoc` from DB, filters to `content_class in {"review", "rating", "event"}`, projects `CompanyMentionDoc` + `MentionEdge` + `AliasEvidenceDoc`, drops and re-inserts mention data. Depends on `build_posts_layer`, runs in parallel with `compute_embeddings`.
 
 **`detect_implicit_replies`** `[@asset]` — BM25 + cosine re-rank + PydanticAI agent to detect implicit reply edges. No `AutomationCondition.eager()` — triggered by `implicit_reply_sensor` only after the `PRECEDING_PARTITIONS_REQUIRED` (2) immediately preceding pages have materialized `extract_company_mentions` (bounded, not all history — see decision 20). Depends on both `extract_company_mentions` (whose ancestor `build_posts_layer` has already written the explicit quote edges, so the `already_linked` exclusion is correct) and `compute_embeddings` (candidate reranking reads `posts.embedding`). The candidate pool is thread-scoped and time-bounded (`fetch_thread_window_posts`, up to `MAX_LOOKBACK_H`), spanning page boundaries so a reply on page N can match a candidate on page N-1 — not limited to the current partition. Uses a time/rate-based adaptive window (`compute_adaptive_window`) within that pool. **Known gap:** design decision 16 specifies a *noise-aware* window and `content_class` labels passed to the LLM, but the current implementation is not yet content-class-aware — see decision 16.
+
+### Observability (Langfuse Cloud)
+
+`compute_embeddings`, `extract_company_mentions`, and `detect_implicit_replies` each trace their per-post OpenAI calls to Langfuse Cloud, tagged with `post_key` / `partition_key` / step name for filtering in the Langfuse UI. The client comes from `LangfuseResource` (`defs/resources/langfuse_resource.py`, an optional `ConfigurableResource` wired in `definitions.py`) — its `setup_for_execution` constructs the client once and calls `Agent.instrument_all()`, which auto-traces the two agent-based steps. Each asset passes `langfuse.get_client()` into the corresponding pure `core/graph/*_sync.py` function as an explicit `langfuse: Langfuse | None = None` argument; those functions never call `get_client()` themselves. `compute_embeddings`' raw `embeddings.create()` calls are traced manually in `embedding_sync.py`. See design decision 21.
 
 ### AutomationCondition
 

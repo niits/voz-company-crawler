@@ -2296,6 +2296,25 @@ wheels = [
 ]
 
 [[package]]
+name = "langfuse"
+version = "4.14.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "backoff" },
+    { name = "httpx" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+    { name = "packaging" },
+    { name = "pydantic" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ae/40/752661e4376dcaa73bf839703296530d91807e90e219e1fc0d24c5460bc2/langfuse-4.14.0.tar.gz", hash = "sha256:31b875c8d09eee39c558584b9424bbd5ed014965c5944c4528a37947ae4b7787", size = 363802, upload-time = "2026-07-10T11:33:39.153Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/76/c7/ca0f591e1184415ffcd920a4107f3d2638ab5af7ff7e498d99a9b8b2bb13/langfuse-4.14.0-py3-none-any.whl", hash = "sha256:632b74abfa14d9ad3dccbe3322bf7e11b0dce9be0de451b0d134db9bff246d44", size = 638356, upload-time = "2026-07-10T11:33:37.419Z" },
+]
+
+[[package]]
 name = "leather"
 version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
@@ -5400,6 +5419,7 @@ dependencies = [
     { name = "dagster-postgres" },
     { name = "dagster-webserver" },
     { name = "dlt", extra = ["postgres"] },
+    { name = "langfuse" },
     { name = "lxml" },
     { name = "nbconvert" },
     { name = "numpy" },
@@ -5433,6 +5453,7 @@ requires-dist = [
     { name = "dagster-postgres", specifier = ">=0.28.19" },
     { name = "dagster-webserver" },
     { name = "dlt", extras = ["postgres"], specifier = ">=1.0" },
+    { name = "langfuse", specifier = ">=4.14.0" },
     { name = "lxml" },
     { name = "nbconvert", specifier = ">=7.17.0" },
     { name = "numpy", specifier = ">=2.4.4" },

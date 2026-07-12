@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from langfuse import Langfuse
 from openai import AsyncOpenAI
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessagesTypeAdapter
@@ -57,11 +58,14 @@ def run_llm_enrichment(
     items: list[EmbedItem],
     api_key: str,
     partition_key: str,
+    langfuse: Langfuse | None = None,
 ) -> tuple[list[ExtractionResultDoc], list[NormalizedPostDoc], EnrichmentStats]:
     """Pure LLM enrichment: classify posts and build extraction docs.
 
     Takes pre-fetched items (key + normalized_own_text). No DB access — designed
     for in-memory op chains where the single write happens at the end of the group.
+    `langfuse` is an already-constructed client (from the optional LangfuseResource) —
+    this module never calls get_client() itself.
 
     Returns (extraction_docs, enrichment_patches, stats).
     """
@@ -80,7 +84,15 @@ def run_llm_enrichment(
 
     for item in items:
         try:
-            result = agent.run_sync(f"post_key: {item.key}\n\n{item.text}")
+            if langfuse is not None:
+                with langfuse.start_as_current_observation(
+                    name="extract_company_mentions",
+                    as_type="span",
+                    metadata={"post_key": item.key, "partition_key": partition_key},
+                ):
+                    result = agent.run_sync(f"post_key: {item.key}\n\n{item.text}")
+            else:
+                result = agent.run_sync(f"post_key: {item.key}\n\n{item.text}")
             output: PostEnrichmentResult = result.output
             usage = result.usage()
 

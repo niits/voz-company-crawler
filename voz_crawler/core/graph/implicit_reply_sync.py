@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+from langfuse import Langfuse
 from openai import AsyncOpenAI
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
@@ -100,12 +101,15 @@ def process_partition_implicit_replies(
     repo,
     api_key: str,
     partition_key: str,
+    langfuse: Langfuse | None = None,
 ) -> ImplicitReplyStats:
     """Detect implicit reply edges for all posts in a partition.
 
     Stage 1: AQL query (BM25 + window boost) → re-rank with cosine similarity.
     Stage 2: LLM agent decides which candidates are genuine implicit replies.
     Inserts ArangoEdge(method="implicit_llm") and patches ExtractionResultDoc.
+    `langfuse` is an already-constructed client (from the optional LangfuseResource) —
+    this module never calls get_client() itself.
     """
     async_client = AsyncOpenAI(api_key=api_key)
     model = OpenAIModel("gpt-4o-mini", provider=OpenAIProvider(openai_client=async_client))
@@ -167,7 +171,15 @@ def process_partition_implicit_replies(
                 f"CANDIDATES:\n{candidate_text}"
             )
 
-            result = agent.run_sync(prompt)
+            if langfuse is not None:
+                with langfuse.start_as_current_observation(
+                    name="detect_implicit_replies",
+                    as_type="span",
+                    metadata={"post_key": src["key"], "partition_key": partition_key},
+                ):
+                    result = agent.run_sync(prompt)
+            else:
+                result = agent.run_sync(prompt)
             decision: ImplicitReplyDecision = result.output
 
             new_implicit: list[dict] = []

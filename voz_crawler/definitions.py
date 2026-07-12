@@ -20,6 +20,7 @@ from voz_crawler.defs.jobs.reply_graph import build_thread_jobs
 from voz_crawler.defs.ops.ingestion import build_discover_op
 from voz_crawler.defs.resources.arango_resource import ArangoDBResource
 from voz_crawler.defs.resources.crawler_resource import CrawlerResource
+from voz_crawler.defs.resources.langfuse_resource import LangfuseResource
 from voz_crawler.defs.resources.postgres_resource import PostgresResource
 from voz_crawler.defs.sensors.ingestion import build_ingestion_sensors
 from voz_crawler.defs.sensors.reply_graph import build_implicit_sensor
@@ -116,5 +117,6 @@ defs = Definitions(
             username=EnvVar("ARANGO_USER"),
             password=EnvVar("ARANGO_PASSWORD"),
         ),
+        "langfuse": LangfuseResource(),
     },
 )
